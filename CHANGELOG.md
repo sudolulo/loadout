@@ -2,6 +2,14 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.13.1] - 2026-07-23
+### Fixed
+- **Harder guarantee that the settings page cannot raise the on-screen keyboard.** 0.11.3 stopped
+  Loadout's own navigation from focusing a text field, but that relied on having found every path
+  that could hand a field focus. The fields are now simply **not focusable** — GTK cannot give
+  them focus when a page is shown, and a stray `grab_focus()` does nothing. Pressing **A** on a
+  field is the one thing that makes it focusable, and **B** takes it away again.
+
 ## [0.13.0] - 2026-07-23
 ### Added
 - **Move a game between disks.** Pressing **Start** on a game already on the Deck now relocates it

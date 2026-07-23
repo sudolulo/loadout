@@ -1605,6 +1605,13 @@ class StoragePage(Gtk.Box):
         # the pad walks the text fields too, so the share can be typed with the on-screen keyboard
         self.focusables = [self.e_host, self.e_share, self.e_pcshare,
                            self.e_user, self.e_pass] + self.btns
+        # A text field that CANNOT take focus cannot raise Steam's on-screen keyboard -- not
+        # via our own navigation, and not via any GTK path that focuses the first focusable
+        # child when a page is shown. Focus is granted only for the moment you press A on a
+        # field (toggle_current) and taken away again on the way out.
+        for w in self.focusables:
+            if isinstance(w, Gtk.Entry):
+                w.set_can_focus(False)
 
         self.prog = Gtk.Label(xalign=0)
         self.prog.get_style_context().add_class("hint")
@@ -1656,9 +1663,12 @@ class StoragePage(Gtk.Box):
             self.defocus_entry()    # park focus off any entry so the keyboard closes
 
     def defocus_entry(self):
-        """Take keyboard focus off a text field (closing the on-screen keyboard) by parking
-        it on the page itself, which accepts focus but types nothing."""
+        """Take keyboard focus off the text fields (closing the on-screen keyboard) and make
+        them unfocusable again, so nothing can hand focus back without going through A."""
         try:
+            for w in self.focusables:
+                if isinstance(w, Gtk.Entry):
+                    w.set_can_focus(False)
             self.set_can_focus(True)
             self.grab_focus()
         except Exception:
@@ -1675,6 +1685,7 @@ class StoragePage(Gtk.Box):
         if isinstance(w, Gtk.Button):
             w.clicked()
         elif w is not None:
+            w.set_can_focus(True)          # deliberate: this is when the keyboard IS wanted
             w.grab_focus()
         return False
 
