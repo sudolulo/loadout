@@ -21,10 +21,11 @@ eval "$(python3 - <<'PY'
 import json, os, glob
 CFG = os.path.expanduser(os.environ.get("LOADOUT_CONFIG",
                                         "~/.config/loadout/config.json"))
-D = {"rom_local": "~/Emulation/.roms-local", "rom_sd": "",
-     "rom_nas": "~/Emulation/.nas-roms", "rom_union": "~/Emulation/roms",
+D = {"rom_local": "~/Emulation/.roms-local", "rom_sd": "~/Emulation/.roms-sd",
+     "rom_nas": "~/Emulation/.roms-nas", "rom_union": "~/Emulation/roms",
      "rom_rclone_remote": "",
-     "pc_local": "~/Games/.pc-local", "pc_nas": "~/Games/.pc-nas",
+     "pc_local": "~/Games/.pc-local", "pc_sd": "~/Games/.pc-sd",
+     "pc_nas": "~/Games/.pc-nas",
      "pc_union": "~/Games/PC", "pc_rclone_remote": ""}
 c = dict(D)
 try:
@@ -33,24 +34,36 @@ except Exception:
     pass
 
 
-def detect_sd():
+def sd_root():
+    """The Deck's SD card: the first removable mount that already looks like a games card."""
     for pat in ("/run/media/deck/*", "/run/media/*/*", "/run/media/*"):
         for m in sorted(glob.glob(pat)):
-            if not os.path.isdir(m):
-                continue
-            for sub in ("Emulation/roms-local", "Emulation/roms"):
-                if os.path.isdir(os.path.join(m, sub)):
-                    return os.path.join(m, sub)
+            if os.path.isdir(m) and (os.path.isdir(os.path.join(m, "Emulation"))
+                                     or os.path.isdir(os.path.join(m, "Games"))):
+                return m
     return ""
 
 
-raw = (c["rom_sd"] or "").strip()
-if raw.lower() in ("off", "none", "disabled"):
-    sd = ""
-elif raw:
-    sd = os.path.expanduser(raw)     # explicit path: created below if missing (user opted in)
-else:
-    sd = detect_sd()
+def pick(root, subs, default):
+    for s in subs:
+        p = os.path.join(root, s)
+        if os.path.isdir(p):
+            return p
+    return os.path.join(root, default)
+
+
+def off(v):
+    return (v or "").strip().lower() in ("off", "none", "disabled")
+
+
+ROOT = sd_root()
+# real dirs ON the card; the hidden .roms-sd/.pc-sd names below are symlinks to these, so every
+# tier has a stable path in ~/Emulation and ~/Games no matter what the card's own layout is.
+sd_real = pick(ROOT, ("Emulation/.roms-local", "Emulation/roms-local", "Emulation/roms"),
+               "Emulation/.roms-local") if ROOT else ""
+pcsd_real = pick(ROOT, ("Games/.pc-local", "Games/PC"), "Games/.pc-local") if ROOT else ""
+sd = "" if off(c["rom_sd"]) else os.path.expanduser(c["rom_sd"] or "~/Emulation/.roms-sd")
+pcsd = "" if off(c.get("pc_sd", "")) else os.path.expanduser(c.get("pc_sd") or "~/Games/.pc-sd")
 
 
 def q(s):
@@ -62,7 +75,10 @@ print("SD=%s" % q(sd))
 print("NAS=%s" % q(os.path.expanduser(c["rom_nas"])))
 print("UNION=%s" % q(os.path.expanduser(c["rom_union"])))
 print("REMOTE_CFG=%s" % q(c.get("rom_rclone_remote", "")))
+print("SDREAL=%s" % q(sd_real))
 print("PCLOCAL=%s" % q(os.path.expanduser(c["pc_local"])))
+print("PCSD=%s" % q(pcsd))
+print("PCSDREAL=%s" % q(pcsd_real))
 print("PCNAS=%s" % q(os.path.expanduser(c["pc_nas"])))
 print("PCUNION=%s" % q(os.path.expanduser(c["pc_union"])))
 print("PCREMOTE_CFG=%s" % q(c.get("pc_rclone_remote", "")))
@@ -101,7 +117,28 @@ migrate_hidden "$NAS"
 if [ ! -d "$LOCAL" ]; then mv "$UNION" "$LOCAL" 2>/dev/null || mkdir -p "$LOCAL"; fi
 mkdir -p "$LOCAL" "$UNION"
 [ "$NAS_ON" = 1 ] && mkdir -p "$NAS"
-[ -n "$SD" ] && mkdir -p "$SD"       # existing auto-detected dir = no-op; explicit path = created
+# retire the previous NAS tier name (.nas-roms) once it's unmounted and empty
+rmdir "$(dirname "$NAS")/.nas-roms" 2>/dev/null && echo "  removed legacy .nas-roms"
+
+# SD tiers are PRESENTED at a stable hidden name and symlinked to whatever layout the card uses, so
+# ~/Emulation/.roms-sd and ~/Games/.pc-sd always mean "the SD branch" -- or are absent when there's
+# no card. Never clobber a real directory sitting at the link path.
+link_sd() {                              # $1 = hidden link path, $2 = real dir on the card
+  local link="$1" real="$2"
+  [ -n "$link" ] || return 0
+  if [ -n "$real" ]; then
+    mkdir -p "$real" 2>/dev/null
+    [ -L "$link" ] && rm -f "$link"
+    [ -e "$link" ] && return 0
+    mkdir -p "$(dirname "$link")"
+    ln -s "$real" "$link" && echo "  SD tier $link -> $real"
+  else
+    [ -L "$link" ] && { rm -f "$link"; echo "  no SD card: dropped $link"; }
+  fi
+  return 0
+}
+link_sd "$SD" "$SDREAL"
+[ -n "$SD" ] && [ ! -d "$SD" ] && SD=""      # no card (or dangling link) => no SD branch
 
 # Make sure these branch dirs exist. This used to `rm -rf` switch/wii to clear partial early-sync
 # copies -- but Loadout now decides what lives locally, so wiping them would DELETE games the user
@@ -180,7 +217,10 @@ mkdir -p "$PCLOCAL" "$PCUNION"
 PCNAS_ON=0
 { [ -n "$PCREMOTE" ] && [ "$PCREMOTE" != "off" ] && [ -n "$RCLONE" ]; } && PCNAS_ON=1
 [ "$PCNAS_ON" = 1 ] && mkdir -p "$PCNAS"
+link_sd "$PCSD" "$PCSDREAL"
+[ -n "$PCSD" ] && [ ! -d "$PCSD" ] && PCSD=""
 PCBRANCHES="$PCLOCAL=RW"
+[ -n "$PCSD" ] && PCBRANCHES="$PCBRANCHES:$PCSD=RW"
 [ "$PCNAS_ON" = 1 ] && PCBRANCHES="$PCBRANCHES:$PCNAS=RO"
 
 if [ "$PCNAS_ON" = 1 ]; then
@@ -236,6 +276,7 @@ svc="mergerfs-roms.service"; [ "$NAS_ON" = 1 ] && svc="rclone-roms.service $svc"
 systemctl --user is-active $svc
 echo "=== PC tiers ==="
 echo "  internal  $PCLOCAL"
+[ -n "$PCSD" ] && echo "  SD        $PCSD"
 [ "$PCNAS_ON" = 1 ] && echo "  NAS       $PCREMOTE  ->  $PCNAS" || echo "  NAS       (disabled -- local-only PC union)"
 echo "  union     $PCUNION"
 echo "=== union mounted? ==="; mountpoint -q "$UNION" && echo "UNION mounted" || echo "UNION NOT mounted"

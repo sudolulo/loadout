@@ -2,6 +2,20 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.11.0] - 2026-07-23
+### Added
+- **SD-card tiers for both unions.** When a card is present `mount-setup` points `.roms-sd` and
+  `.pc-sd` at whatever layout the card actually uses (via a symlink), so an SD branch always has
+  the same stable path whether or not a card is inserted. Pull the card and the stale link is
+  dropped; a real folder sitting at that path is never clobbered.
+### Changed
+- **Every tier now has a consistent name beside its union**, so the two libraries read identically:
+  - `~/Emulation/` → `roms` (the union) ← `.roms-local`, `.roms-sd`, `.roms-nas`
+  - `~/Games/` → `PC` (the union) ← `.pc-local`, `.pc-sd`, `.pc-nas`
+
+  The NAS tier was `.nas-roms`; it is `.roms-nas` now and the old empty mountpoint is retired
+  automatically on the next rebuild.
+
 ## [0.10.0] - 2026-07-23
 ### Added
 - **A union for PC games.** PC games now get the same three-tier treatment as ROMs, in the same

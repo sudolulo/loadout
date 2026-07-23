@@ -69,12 +69,11 @@ _DEFAULTS = {
     "rom_local":   "~/Emulation/.roms-local",  # writable INTERNAL ROM branch of the union. Hidden:
                                                 #   the union (rom_union) is the only ROM dir you
                                                 #   should ever browse; the tiers are plumbing.
-    "rom_sd":      "",                          # SD-card ROM branch: "" = auto-detect the
-                                                #   Deck SD, an explicit path forces it,
-                                                #   "off" disables (internal + NAS only)
-    "rom_nas":     "~/Emulation/.nas-roms",     # read-only NAS branch (rclone mount). Beside the
-                                                #   other tiers and hidden, so ~/Emulation shows
-                                                #   only `roms` (the union) for the ROM library.
+    "rom_sd":      "~/Emulation/.roms-sd",      # SD-card ROM branch. mount-setup points this at the
+                                                #   real SD dir (a symlink) when a card is present,
+                                                #   so every tier has a stable name here. "" =
+                                                #   auto-detect, "off" = internal + NAS only.
+    "rom_nas":     "~/Emulation/.roms-nas",     # read-only NAS branch (rclone mount), hidden
     "rom_rclone_remote": "",                    # rclone "remote:path" for the NAS tier, set by
                                                 #   the in-app SMB setup; "" = no NAS (local-only),
                                                 #   "off" also disables. Secrets live in
@@ -85,8 +84,9 @@ _DEFAULTS = {
     "recent_on_add": True,                      # stamp newly-added games as just-played so they
                                                 #   appear on the Deck's home "Recent games" shelf
     # PC mirrors the Emulation layout exactly: a parent dir holding the UNION you browse plus the
-    # hidden tiers that feed it.  ~/Games/PC  <-  ~/Games/.pc-local + ~/Games/.pc-nas
+    # hidden tiers that feed it.  ~/Games/PC  <-  .pc-local + .pc-sd + .pc-nas
     "pc_local":    "~/Games/.pc-local",         # writable INTERNAL PC branch (hidden)
+    "pc_sd":       "~/Games/.pc-sd",            # SD-card PC branch (symlinked by mount-setup)
     "pc_nas":      "~/Games/.pc-nas",           # read-only NAS PC branch (rclone mount, hidden)
     "pc_rclone_remote": "",                     # rclone "remote:path" for the PC NAS tier, e.g.
                                                 #   games:games/PC. "" / "off" = no NAS PC tier.
@@ -175,6 +175,7 @@ if ROM_SD:
 DEFAULT_DEST = "sd" if (ROM_SD and str(_C["default_target"]).strip().lower() != "internal") \
     else "internal"
 PC_LOCAL = _C["pc_local"]
+PC_SD = _resolve_sd(_C.get("pc_sd", ""))       # "" when the card has no PC games dir
 PC_NAS = _C["pc_nas"]
 PC_MANIFEST = _C["pc_manifest"]
 SF_DIR = os.path.join(ROM_LOCAL, ".steam-shortcuts")   # deck-writable Steam pick set
@@ -1409,6 +1410,9 @@ def pc_union_status():
     """Same shape as union_status(), for the PC games union (~/Games/PC fed by the hidden tiers)."""
     tiers = [("Internal", PC_LOCAL, "RW", os.path.isdir(PC_LOCAL), free_on(PC_LOCAL),
               _system_dirs(PC_LOCAL)[0])]
+    if PC_SD:
+        tiers.append(("SD", PC_SD, "RW", os.path.isdir(PC_SD), free_on(PC_SD),
+                      _system_dirs(PC_SD)[0]))
     up = PC_NAS_OK
     tiers.append(("NAS", PC_NAS, "RO", up, free_on(PC_NAS) if up else 0,
                   _system_dirs(PC_NAS)[0] if up else 0))
