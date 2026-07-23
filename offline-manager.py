@@ -322,8 +322,10 @@ class GameRow:
 
 
 def enumerate_folder_games(system, ldir, ndir):
-    """PS3/PS4 etc.: each game is a directory (decrypted disc folder / pkg set). The whole
-    folder is one game -- the unit that gets copied offline and made a Steam shortcut."""
+    """PS3/PS4 etc.: each PLAYABLE game is a directory named `<title>.<system>` (a decrypted
+    PS3 disc folder / an extracted PS4 game). Raw pkg/rar source dirs left in the console
+    folder are NOT playable and are skipped -- you only see the finished game."""
+    ext = "." + system                     # .ps3 / .ps4 / .psvita
     info = {}
     for base, islocal in ((ndir, False), (ldir, True)):
         if not os.path.isdir(base):
@@ -332,8 +334,8 @@ def enumerate_folder_games(system, ldir, ndir):
             if dn.startswith(".") or dn in SKIP:
                 continue
             p = os.path.join(base, dn)
-            if not os.path.isdir(p):
-                continue
+            if not os.path.isdir(p) or not dn.lower().endswith(ext):
+                continue                   # skip pkg/rar source dirs -- only extracted games
             d = info.setdefault(dn, {"size": 0, "local": False})
             d["size"] = max(d["size"], du(p))
             if islocal:
