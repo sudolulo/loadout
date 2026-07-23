@@ -69,10 +69,9 @@ _DEFAULTS = {
     "rom_local":   "~/Emulation/.roms-local",  # writable INTERNAL ROM branch of the union. Hidden:
                                                 #   the union (rom_union) is the only ROM dir you
                                                 #   should ever browse; the tiers are plumbing.
-    "rom_sd":      "~/Emulation/.roms-sd",      # SD-card ROM branch. mount-setup points this at the
-                                                #   real SD dir (a symlink) when a card is present,
-                                                #   so every tier has a stable name here. "" =
-                                                #   auto-detect, "off" = internal + NAS only.
+    "rom_sd":      "",                          # SD-card ROM branch: "" = auto-detect the card
+                                                #   (<card>/ROMs), an explicit path forces it,
+                                                #   "off" = internal + NAS only
     "rom_nas":     "~/Emulation/.roms-nas",     # read-only NAS branch (rclone mount), hidden
     "rom_rclone_remote": "",                    # rclone "remote:path" for the NAS tier, set by
                                                 #   the in-app SMB setup; "" = no NAS (local-only),
@@ -86,7 +85,7 @@ _DEFAULTS = {
     # PC mirrors the Emulation layout exactly: a parent dir holding the UNION you browse plus the
     # hidden tiers that feed it.  ~/Games/PC  <-  .pc-local + .pc-sd + .pc-nas
     "pc_local":    "~/Games/.pc-local",         # writable INTERNAL PC branch (hidden)
-    "pc_sd":       "~/Games/.pc-sd",            # SD-card PC branch (symlinked by mount-setup)
+    "pc_sd":       "",                          # SD-card PC branch: "" = auto-detect (<card>/PC)
     "pc_nas":      "~/Games/.pc-nas",           # read-only NAS PC branch (rclone mount, hidden)
     "pc_rclone_remote": "",                     # rclone "remote:path" for the PC NAS tier, e.g.
                                                 #   games:games/PC. "" / "off" = no NAS PC tier.
@@ -97,7 +96,8 @@ _DEFAULTS = {
 }
 # Values expanduser'd on load; these two are plain strings (a mode / a path-or-sentinel),
 # so leave them raw and let the resolvers below interpret them.
-_RAW_KEYS = ("default_target", "rom_sd", "rom_rclone_remote", "pc_rclone_remote", "recent_on_add")
+_RAW_KEYS = ("default_target", "rom_sd", "pc_sd", "rom_rclone_remote", "pc_rclone_remote",
+             "recent_on_add")
 CONFIG_PATH = os.path.expanduser(
     os.environ.get("LOADOUT_CONFIG", "~/.config/loadout/config.json"))
 
@@ -130,32 +130,44 @@ def save_config_value(key, value):
     os.replace(tmp, CONFIG_PATH)
 
 
-def _detect_sd():
-    """Best-effort Deck SD-card ROM dir: the first removable mount that already holds an
-    Emulation/roms(-local) tree. Returns "" when nothing looks like one -- the SD is
-    optional, so no match just means a two-tier (internal + NAS) library."""
+def _sd_root():
+    """The Deck's games card: the first removable mount that already looks like one. Returns ""
+    when nothing does -- the card is optional, so no match just means no SD tier."""
     import glob
     for pat in ("/run/media/deck/*", "/run/media/*/*", "/run/media/*"):
         for m in sorted(glob.glob(pat)):
-            if not os.path.isdir(m):
-                continue
-            for sub in ("Emulation/roms-local", "Emulation/roms"):
-                cand = os.path.join(m, sub)
-                if os.path.isdir(cand):
-                    return cand
+            if os.path.isdir(m) and any(os.path.isdir(os.path.join(m, s))
+                                        for s in ("ROMs", "PC", "Emulation", "Games")):
+                return m
     return ""
 
 
-def _resolve_sd(raw):
-    """Config value -> the SD ROM branch to use, or "" for none.
+def _detect_sd(kind="rom"):
+    """The card's ROM or PC dir. A card mirrors the share's layout -- <card>/ROMs and <card>/PC --
+    with the older EmuDeck locations accepted so an existing card keeps working."""
+    root = _sd_root()
+    if not root:
+        return ""
+    subs = ("ROMs", "roms", "Emulation/roms-local", "Emulation/roms") if kind == "rom" \
+        else ("PC", "pc", "Games/PC", "Games/.pc-local")
+    for s in subs:
+        p = os.path.join(root, s)
+        if os.path.isdir(p):
+            return p
+    return ""
 
-    ""/unset -> auto-detect; off/none/disabled -> disabled; else the given path. In every
-    case the branch is only used when it is a real directory, so a configured-but-unmounted
-    SD (card pulled out) degrades cleanly to internal-only."""
+
+def _resolve_sd(raw, kind="rom"):
+    """Config value -> the SD branch to use, or "" for none.
+
+    ""/unset -> auto-detect the card; off/none/disabled -> disabled; else the given path. The
+    branch is only used when it's a real directory, so a card that's been pulled degrades cleanly
+    to internal + NAS. The card's REAL path goes straight into the union -- no symlink indirection,
+    since the tiers are hidden plumbing and mergerfs wants the actual path anyway."""
     v = (raw or "").strip()
     if v.lower() in ("off", "none", "disabled"):
         return ""
-    path = os.path.expanduser(v) if v else _detect_sd()
+    path = os.path.expanduser(v) if v else _detect_sd(kind)
     return path if path and os.path.isdir(path) else ""
 
 
@@ -175,7 +187,7 @@ if ROM_SD:
 DEFAULT_DEST = "sd" if (ROM_SD and str(_C["default_target"]).strip().lower() != "internal") \
     else "internal"
 PC_LOCAL = _C["pc_local"]
-PC_SD = _resolve_sd(_C.get("pc_sd", ""))       # "" when the card has no PC games dir
+PC_SD = _resolve_sd(_C.get("pc_sd", ""), "pc")  # "" when the card has no PC dir
 PC_NAS = _C["pc_nas"]
 PC_MANIFEST = _C["pc_manifest"]
 SF_DIR = os.path.join(ROM_LOCAL, ".steam-shortcuts")   # deck-writable Steam pick set

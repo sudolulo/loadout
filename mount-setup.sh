@@ -44,26 +44,32 @@ def sd_root():
     return ""
 
 
-def pick(root, subs, default):
-    for s in subs:
-        p = os.path.join(root, s)
-        if os.path.isdir(p):
-            return p
-    return os.path.join(root, default)
-
-
 def off(v):
     return (v or "").strip().lower() in ("off", "none", "disabled")
 
 
 ROOT = sd_root()
-# real dirs ON the card; the hidden .roms-sd/.pc-sd names below are symlinks to these, so every
-# tier has a stable path in ~/Emulation and ~/Games no matter what the card's own layout is.
-sd_real = pick(ROOT, ("Emulation/.roms-local", "Emulation/roms-local", "Emulation/roms"),
-               "Emulation/.roms-local") if ROOT else ""
-pcsd_real = pick(ROOT, ("Games/.pc-local", "Games/PC"), "Games/.pc-local") if ROOT else ""
-sd = "" if off(c["rom_sd"]) else os.path.expanduser(c["rom_sd"] or "~/Emulation/.roms-sd")
-pcsd = "" if off(c.get("pc_sd", "")) else os.path.expanduser(c.get("pc_sd") or "~/Games/.pc-sd")
+
+
+def sd_dir(subs, default):
+    """The card's branch for one library. Prefer a dir the card ALREADY uses (so an existing
+    EmuDeck card keeps working), else fall back to the standard name, which the shell creates.
+    The card's real path goes straight into the union -- no symlink indirection."""
+    if not ROOT:
+        return ""
+    for s in subs:
+        p = os.path.join(ROOT, s)
+        if os.path.isdir(p):
+            return p
+    return os.path.join(ROOT, default)
+
+
+# a card mirrors the share: <card>/ROMs and <card>/PC
+sd = "" if off(c["rom_sd"]) else (os.path.expanduser(c["rom_sd"]) if (c["rom_sd"] or "").strip()
+     else sd_dir(("ROMs", "roms", "Emulation/roms-local", "Emulation/roms"), "ROMs"))
+pcsd = "" if off(c.get("pc_sd", "")) else (
+    os.path.expanduser(c["pc_sd"]) if (c.get("pc_sd") or "").strip()
+    else sd_dir(("PC", "pc", "Games/PC", "Games/.pc-local"), "PC"))
 
 
 def q(s):
@@ -75,10 +81,8 @@ print("SD=%s" % q(sd))
 print("NAS=%s" % q(os.path.expanduser(c["rom_nas"])))
 print("UNION=%s" % q(os.path.expanduser(c["rom_union"])))
 print("REMOTE_CFG=%s" % q(c.get("rom_rclone_remote", "")))
-print("SDREAL=%s" % q(sd_real))
 print("PCLOCAL=%s" % q(os.path.expanduser(c["pc_local"])))
 print("PCSD=%s" % q(pcsd))
-print("PCSDREAL=%s" % q(pcsd_real))
 print("PCNAS=%s" % q(os.path.expanduser(c["pc_nas"])))
 print("PCUNION=%s" % q(os.path.expanduser(c["pc_union"])))
 print("PCREMOTE_CFG=%s" % q(c.get("pc_rclone_remote", "")))
@@ -120,25 +124,11 @@ mkdir -p "$LOCAL" "$UNION"
 # retire the previous NAS tier name (.nas-roms) once it's unmounted and empty
 rmdir "$(dirname "$NAS")/.nas-roms" 2>/dev/null && echo "  removed legacy .nas-roms"
 
-# SD tiers are PRESENTED at a stable hidden name and symlinked to whatever layout the card uses, so
-# ~/Emulation/.roms-sd and ~/Games/.pc-sd always mean "the SD branch" -- or are absent when there's
-# no card. Never clobber a real directory sitting at the link path.
-link_sd() {                              # $1 = hidden link path, $2 = real dir on the card
-  local link="$1" real="$2"
-  [ -n "$link" ] || return 0
-  if [ -n "$real" ]; then
-    mkdir -p "$real" 2>/dev/null
-    [ -L "$link" ] && rm -f "$link"
-    [ -e "$link" ] && return 0
-    mkdir -p "$(dirname "$link")"
-    ln -s "$real" "$link" && echo "  SD tier $link -> $real"
-  else
-    [ -L "$link" ] && { rm -f "$link"; echo "  no SD card: dropped $link"; }
-  fi
-  return 0
-}
-link_sd "$SD" "$SDREAL"
-[ -n "$SD" ] && [ ! -d "$SD" ] && SD=""      # no card (or dangling link) => no SD branch
+# SD branches use the card's REAL path (<card>/ROMs, <card>/PC) -- the tiers are hidden plumbing and
+# mergerfs wants the actual path, so a symlink would be indirection with no payoff. Create the dir
+# on a card we've identified; if there's no card the branch simply drops out.
+[ -n "$SD" ] && mkdir -p "$SD" 2>/dev/null
+[ -n "$SD" ] && [ ! -d "$SD" ] && SD=""      # no card => no SD branch
 
 # Make sure these branch dirs exist. This used to `rm -rf` switch/wii to clear partial early-sync
 # copies -- but Loadout now decides what lives locally, so wiping them would DELETE games the user
@@ -217,7 +207,7 @@ mkdir -p "$PCLOCAL" "$PCUNION"
 PCNAS_ON=0
 { [ -n "$PCREMOTE" ] && [ "$PCREMOTE" != "off" ] && [ -n "$RCLONE" ]; } && PCNAS_ON=1
 [ "$PCNAS_ON" = 1 ] && mkdir -p "$PCNAS"
-link_sd "$PCSD" "$PCSDREAL"
+[ -n "$PCSD" ] && mkdir -p "$PCSD" 2>/dev/null
 [ -n "$PCSD" ] && [ ! -d "$PCSD" ] && PCSD=""
 PCBRANCHES="$PCLOCAL=RW"
 [ -n "$PCSD" ] && PCBRANCHES="$PCBRANCHES:$PCSD=RW"

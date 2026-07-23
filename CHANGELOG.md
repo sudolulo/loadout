@@ -2,12 +2,20 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
-## [0.11.0] - 2026-07-23
+## [0.11.1] - 2026-07-23
 ### Added
-- **SD-card tiers for both unions.** When a card is present `mount-setup` points `.roms-sd` and
-  `.pc-sd` at whatever layout the card actually uses (via a symlink), so an SD branch always has
-  the same stable path whether or not a card is inserted. Pull the card and the stale link is
-  dropped; a real folder sitting at that path is never clobbered.
+- **SD-card tiers for both unions.** When a card is present it joins the ROM and PC unions as a
+  writable tier, using the card's **own path directly** — `<card>/ROMs` and `<card>/PC`, matching
+  the share's layout. An existing EmuDeck card keeps working (its `Emulation/roms` is detected), a
+  blank card gets the standard folders created, and with no card the branch simply drops out.
+  Auto-detected by default (`rom_sd`/`pc_sd` = `""`); set a path to force one or `"off"` to disable.
+### Changed
+- Simplified from 0.11.0, which presented the SD tiers as `.roms-sd` / `.pc-sd` symlinks. The
+  tiers are hidden plumbing nobody browses and mergerfs wants the real path anyway, so the
+  indirection bought nothing while adding dangling-link and clobber cases. 0.11.0 was never
+  deployed; this is what ships.
+
+## [0.11.0] - 2026-07-23
 ### Changed
 - **Every tier now has a consistent name beside its union**, so the two libraries read identically:
   - `~/Emulation/` → `roms` (the union) ← `.roms-local`, `.roms-sd`, `.roms-nas`
