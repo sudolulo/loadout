@@ -7,7 +7,7 @@
   "default_target": "sd",
   "_recent_on_add": "Stamp newly-added games as just-played so they appear on the Deck's home 'Recent games' shelf. Set false to leave play history untouched.",
   "recent_on_add": true,
-  "rom_nas":      "~/.cache/nas-roms",
+  "rom_nas":      "~/Emulation/nas-roms",
   "_rom_rclone_remote": "rclone remote:path for the NAS tier, set by the in-app SMB setup (Storage page). \"\" = local-only (no NAS); credentials live obscured in rclone.conf, never here.",
   "rom_rclone_remote": "",
   "rom_union":    "~/Emulation/roms",

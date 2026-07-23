@@ -2,6 +2,27 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.9.0] - 2026-07-23
+### Added
+- **Storage & NAS settings page.** The Storage section now shows, for every tier (Internal / SD /
+  NAS): its **folder path**, read/write mode, mount state, free space and how many systems it
+  holds — plus the union those tiers feed and the **NAS source remote with its connection state**.
+  The SMB share is edited **right on the page** (Host / Share-path / User / Password) with **Test**
+  and **Save & mount**; the password is obscured into rclone's config and never stored in Loadout's.
+  The D-pad walks the text fields too, so it's typeable with the Deck's on-screen keyboard.
+- **Prune empty systems.** A **Prune empty** action deletes system folders that contain no ROMs —
+  only ES-DE/EmuDeck scaffolding (`media/`, `gamelist.xml`) — so the ROM folders reflect the games
+  you actually have. It never touches a folder holding real content (including nested game dirs),
+  hidden/`_` buckets, or the read-only NAS tier.
+### Changed
+- **The NAS now mounts at `~/Emulation/nas-roms`** rather than `~/.cache/nas-roms`, so all three
+  ROM tiers sit together and are obvious: `roms-local` (internal, RW), `nas-roms` (NAS, RO) and
+  `roms` (the union your emulators read).
+### Fixed
+- **`mount-setup` no longer deletes the internal `switch`/`wii` folders.** It wiped them on every
+  run to clear partial early-sync copies — which meant rebuilding the union would have destroyed
+  games you had deliberately pulled offline.
+
 ## [0.8.4] - 2026-07-23
 ### Fixed
 - **Loadout launches even when the NAS is unreachable.** A dropped/stale rclone (SMB) mount makes

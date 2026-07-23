@@ -70,7 +70,9 @@ _DEFAULTS = {
     "rom_sd":      "",                          # SD-card ROM branch: "" = auto-detect the
                                                 #   Deck SD, an explicit path forces it,
                                                 #   "off" disables (internal + NAS only)
-    "rom_nas":     "~/.cache/nas-roms",         # read-only NAS branch (rclone mount)
+    "rom_nas":     "~/Emulation/nas-roms",      # read-only NAS branch (rclone mount). Lives beside
+                                                #   roms-local and the roms union so every ROM tier
+                                                #   is in one place (not buried in ~/.cache).
     "rom_rclone_remote": "",                    # rclone "remote:path" for the NAS tier, set by
                                                 #   the in-app SMB setup; "" = no NAS (local-only),
                                                 #   "off" also disables. Secrets live in
@@ -1327,15 +1329,72 @@ class SavesPage(Gtk.Box):
         return False
 
 
+def _system_dirs(base):
+    """System folders on a branch: (total, with_games). ONE listdir for the total (cheap enough for
+    the settings page); `with_games` needs a peek inside each, so it's only computed for local
+    branches — a networked tier reports -1 and the page shows the total alone."""
+    try:
+        names = [n for n in os.listdir(base)
+                 if not n.startswith((".", "_")) and os.path.isdir(os.path.join(base, n))]
+    except OSError:
+        return 0, 0
+    return len(names), -1
+
+
+def system_is_empty(path):
+    """True when a system folder holds no actual ROM content — only ES-DE/EmuDeck scaffolding
+    (media/, gamelist.xml, …) or nothing at all. Used to prune the clutter EmuDeck creates."""
+    try:
+        for f in os.listdir(path):
+            if f.startswith(".") or f in SCAFFOLD or f in SKIP:
+                continue
+            full = os.path.join(path, f)
+            if os.path.isdir(full):
+                if not system_is_empty(full):       # a nested folder with real content counts
+                    return False
+                continue
+            return False                            # any real file = not empty
+    except OSError:
+        return False                                # unreadable -> never prune it
+    return True
+
+
+def prune_empty_systems(base, dry_run=True):
+    """Remove system folders on `base` that contain no ROMs (only scaffolding). Returns the list of
+    folder names that are/were pruned. Never touches a branch it can't read, hidden/'_' buckets, or
+    anything holding real content."""
+    gone = []
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return gone
+    for n in names:
+        if n.startswith((".", "_")):
+            continue
+        p = os.path.join(base, n)
+        if not os.path.isdir(p) or not system_is_empty(p):
+            continue
+        gone.append(n)
+        if not dry_run:
+            try:
+                shutil.rmtree(p)
+            except OSError:
+                gone.remove(n)
+    return gone
+
+
 def union_status():
-    """(union_mounted, [(label, path, mode, mounted, free_bytes), ...]) for the storage tiers."""
-    tiers = [("Internal", ROM_LOCAL, "RW", os.path.isdir(ROM_LOCAL), free_on(ROM_LOCAL))]
+    """(union_mounted, [(label, path, mode, mounted, free_bytes, n_systems), ...]) for the tiers."""
+    tiers = [("Internal", ROM_LOCAL, "RW", os.path.isdir(ROM_LOCAL), free_on(ROM_LOCAL),
+              _system_dirs(ROM_LOCAL)[0])]
     if ROM_SD:
-        tiers.append(("SD", ROM_SD, "RW", os.path.isdir(ROM_SD), free_on(ROM_SD)))
+        tiers.append(("SD", ROM_SD, "RW", os.path.isdir(ROM_SD), free_on(ROM_SD),
+                      _system_dirs(ROM_SD)[0]))
     # use the one-time NAS probe, NOT os.path.ismount()/statvfs() which HANG on a wedged rclone
     # mount; only statvfs the NAS when it's known alive, so a dead NAS can't freeze the Storage page.
     nas_up = NAS_OK
-    tiers.append(("NAS", ROM_NAS, "RO", nas_up, free_on(ROM_NAS) if nas_up else 0))
+    tiers.append(("NAS", ROM_NAS, "RO", nas_up, free_on(ROM_NAS) if nas_up else 0,
+                  _system_dirs(ROM_NAS)[0] if nas_up else 0))
     return _mount_responsive(ROM_UNION), tiers
 
 
@@ -1348,32 +1407,60 @@ class StoragePage(Gtk.Box):
     view = None
 
     def __init__(self, app):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.app = app
         self.rows = []
-        self.set_border_width(20)
+        self.set_border_width(16)
+        self._remote_name = "games"
+
         self.status = Gtk.Label(xalign=0)
         self.status.get_style_context().add_class("big")
         self.status.set_line_wrap(True)
         self.pack_start(self.status, False, False, 0)
-        self.detail = Gtk.Label(xalign=0)
+        self.detail = Gtk.Label(xalign=0)          # one block per tier: path / mode / free / systems
+        self.detail.set_line_wrap(True)
         self.pack_start(self.detail, False, False, 0)
+
+        # --- SMB share: where the NAS tier comes from. Loadout owns this connection. ---
+        hdr = Gtk.Label(xalign=0)
+        hdr.set_markup("<b>NAS share (SMB)</b>")
+        self.pack_start(hdr, False, False, 0)
+        grid = Gtk.Grid(column_spacing=10, row_spacing=4)
+        self.e_host = Gtk.Entry(); self.e_share = Gtk.Entry()
+        self.e_user = Gtk.Entry(); self.e_pass = Gtk.Entry()
+        for i, (lbl, ent, ph) in enumerate((
+                ("Host", self.e_host, "192.168.10.14"),
+                ("Share / path", self.e_share, "games/roms"),
+                ("User", self.e_user, "(blank = guest)"),
+                ("Password", self.e_pass, "(unchanged)"))):
+            grid.attach(Gtk.Label(label=lbl, xalign=1), 0, i, 1, 1)
+            ent.set_hexpand(True)
+            ent.set_placeholder_text(ph)
+            grid.attach(ent, 1, i, 1, 1)
+        self.e_pass.set_visibility(False)
+        self.e_pass.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+        self.pack_start(grid, False, False, 0)
+
         self.btns = []
-        nb = Gtk.Button(label="Set up NAS share…   (SMB host / share / login)")
-        nb.set_size_request(500, 62)
-        nb.connect("clicked", lambda *_: self.open_nas_setup())
-        self.btns.append(nb)
-        self.pack_start(nb, False, False, 0)
-        b = Gtk.Button(label="Rebuild union      (re-provision the tiers)")
-        b.set_size_request(500, 62)
-        b.connect("clicked", lambda *_: self.rebuild())
-        self.btns.append(b)
-        self.pack_start(b, False, False, 0)
+        brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for label, cb in (("Test", self.test_nas), ("Save & mount", self.save_nas),
+                          ("Rebuild union", self.rebuild), ("Prune empty", self.prune)):
+            b = Gtk.Button(label=label)
+            b.set_size_request(170, 52)
+            b.connect("clicked", lambda _w, f=cb: f())
+            self.btns.append(b)
+            brow.pack_start(b, False, False, 0)
+        self.pack_start(brow, False, False, 0)
+        # the pad walks the text fields too, so the share can be typed with the on-screen keyboard
+        self.focusables = [self.e_host, self.e_share, self.e_user, self.e_pass] + self.btns
+
         self.prog = Gtk.Label(xalign=0)
         self.prog.get_style_context().add_class("hint")
+        self.prog.set_line_wrap(True)
         self.pack_start(self.prog, False, False, 0)
         self.focus = 0
         self.busy = False
+        self._prefill_smb()
         self.refresh()
 
     # ---- App-compat no-ops ----
@@ -1389,33 +1476,65 @@ class StoragePage(Gtk.Box):
     def load(self, *_):
         pass
 
-    # ---- gamepad (button panel) ----
+    # ---- gamepad (field + button panel) ----
     def move_focus(self, delta):
-        self.focus = max(0, min(len(self.btns) - 1, self.focus + delta))
+        self.focus = max(0, min(len(self.focusables) - 1, self.focus + delta))
         self.highlight()
 
     def highlight(self):
-        if self.btns:
-            self.btns[self.focus].grab_focus()
+        if self.focusables:
+            self.focusables[self.focus].grab_focus()
 
     def toggle_current(self, *_):
-        self.rebuild()
+        """A on a button presses it; A on a text field focuses it so the Deck's on-screen
+        keyboard opens for typing the share details."""
+        w = self.focusables[self.focus] if self.focusables else None
+        if isinstance(w, Gtk.Button):
+            w.clicked()
+        elif w is not None:
+            w.grab_focus()
+        return False
 
     # ---- state ----
+    def _prefill_smb(self):
+        """Fill the SMB fields from the saved remote (never the password)."""
+        cur = _C.get("rom_rclone_remote", "") or ""
+        name, path = "games", ""
+        if ":" in cur and cur.lower() != "off":
+            name, path = cur.split(":", 1)
+        self._remote_name = name or "games"
+        pre = nas_setup.read_remote(self._remote_name)
+        self.e_host.set_text(pre.get("host", ""))
+        self.e_user.set_text(pre.get("user", ""))
+        self.e_share.set_text(path)
+
     def refresh(self):
+        esc = GLib.markup_escape_text
         mounted, tiers = union_status()
         self.status.set_markup(
-            "Library union   <b>%s</b>\n%s" % (ROM_UNION,
-            "<span foreground='#7fdc7f'>● mounted</span>" if mounted else
-            "<span foreground='#ff8a8a'>○ not mounted — press Rebuild</span>"))
+            "Library union   <b>%s</b>   %s\n"
+            "<span foreground='#9aa0a6' size='small'>what your emulators read — the tiers below, "
+            "merged</span>"
+            % (esc(ROM_UNION),
+               "<span foreground='#7fdc7f'>● mounted</span>" if mounted else
+               "<span foreground='#ff8a8a'>○ not mounted — press Rebuild union</span>"))
         rows = []
-        for label, path, mode, up, free in tiers:
+        for label, path, mode, up, free, nsys in tiers:
             dot = "<span foreground='#7fdc7f'>●</span>" if up else \
                   "<span foreground='#6b7280'>○</span>"
-            state = ("%s · %s free" % (mode, human(free))) if up else \
-                    ("%s · not mounted" % mode)
-            rows.append("%s  <b>%s</b>\n<span foreground='#9aa0a6'>      %s   —   %s</span>"
-                        % (dot, label, path, state))
+            if up:
+                state = "%s · %s free · %d system%s" % (mode, human(free), nsys,
+                                                        "" if nsys == 1 else "s")
+            else:
+                state = "%s · not mounted" % mode
+            rows.append("%s <b>%s</b>  <span foreground='#9aa0a6'>%s</span>\n"
+                        "<span foreground='#6b7280'>     %s</span>"
+                        % (dot, label, state, esc(path)))
+        remote = _C.get("rom_rclone_remote", "") or "games:roms (default)"
+        rows.append("<span foreground='#6b7280'>     NAS source: %s — %s</span>"
+                    % (esc(remote),
+                       "<span foreground='#7fdc7f'>connected</span>" if NAS_OK else
+                       "<span foreground='#ff8a8a'>unreachable</span>"))
         self.detail.set_markup("\n".join(rows))
 
     def rebuild(self):
@@ -1440,6 +1559,61 @@ class StoragePage(Gtk.Box):
         self.refresh()
         self.app.reload()
         return False
+
+    def _apply_smb(self, persist):
+        """Write the SMB remote from the fields into rclone.conf (password obscured, never stored
+        in Loadout's config). Returns the remote:path, or None if validation/rclone failed."""
+        host, share = self.e_host.get_text().strip(), self.e_share.get_text().strip()
+        user, pw = self.e_user.get_text().strip(), self.e_pass.get_text()
+        if not host or not share:
+            self.prog.set_text("Host and Share / path are required.")
+            return None
+        try:
+            nas_setup.write_remote(self._remote_name, host, user, pw, keep_existing_pass=True)
+        except Exception as ex:
+            self.prog.set_text("rclone error: %s" % ex)
+            return None
+        remote = nas_setup.remote_path(self._remote_name, share)
+        if persist:
+            save_config_value("rom_rclone_remote", remote)
+            _C["rom_rclone_remote"] = remote
+            self.e_pass.set_text("")
+        return remote
+
+    def test_nas(self):
+        remote = self._apply_smb(persist=False)
+        if not remote:
+            return
+        self.prog.set_text("Testing %s …" % remote)
+
+        def work():
+            ok, msg = nas_setup.test_remote(remote)
+            GLib.idle_add(self.prog.set_text, msg)
+        threading.Thread(target=work, daemon=True).start()
+
+    def save_nas(self):
+        remote = self._apply_smb(persist=True)
+        if not remote:
+            return
+        self.prog.set_text("Saved %s — remounting…" % remote)
+        self.rebuild()
+
+    def prune(self):
+        """Delete system folders that hold no ROMs — only ES-DE/EmuDeck scaffolding. Local
+        branches only; the NAS tier is read-only and never touched."""
+        if self.busy:
+            return
+        self.busy = True
+        self.prog.set_text("Scanning for empty system folders…")
+
+        def work():
+            gone = []
+            for b in ROM_LOCALS:
+                gone += prune_empty_systems(b, dry_run=False)
+            msg = ("Pruned %d empty system folder%s." % (len(gone), "" if len(gone) == 1 else "s")
+                   if gone else "No empty system folders to prune.")
+            GLib.idle_add(self._done, msg)
+        threading.Thread(target=work, daemon=True).start()
 
     def open_nas_setup(self):
         """Modal SMB setup: Host / Share / User / Password -> an obscured rclone remote +

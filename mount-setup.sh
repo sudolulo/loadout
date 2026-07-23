@@ -22,7 +22,7 @@ import json, os, glob
 CFG = os.path.expanduser(os.environ.get("LOADOUT_CONFIG",
                                         "~/.config/loadout/config.json"))
 D = {"rom_local": "~/Emulation/roms-local", "rom_sd": "",
-     "rom_nas": "~/.cache/nas-roms", "rom_union": "~/Emulation/roms",
+     "rom_nas": "~/Emulation/nas-roms", "rom_union": "~/Emulation/roms",
      "rom_rclone_remote": ""}
 c = dict(D)
 try:
@@ -81,9 +81,10 @@ mkdir -p "$LOCAL" "$UNION"
 [ "$NAS_ON" = 1 ] && mkdir -p "$NAS"
 [ -n "$SD" ] && mkdir -p "$SD"       # existing auto-detected dir = no-op; explicit path = created
 
-# leave Switch/Wii OFF the INTERNAL branch (clear partial early-sync copies; share provides
-# them). NEVER touch the SD -- it may hold the user's existing library.
-rm -rf "$LOCAL/switch" "$LOCAL/wii"; mkdir -p "$LOCAL/switch" "$LOCAL/wii"
+# Make sure these branch dirs exist. This used to `rm -rf` switch/wii to clear partial early-sync
+# copies -- but Loadout now decides what lives locally, so wiping them would DELETE games the user
+# deliberately pulled offline (a Rebuild union would eat them). Never destroy branch content here.
+mkdir -p "$LOCAL/switch" "$LOCAL/wii"
 
 # assemble the branch string: internal RW, then SD RW, then NAS RO -- whichever exist
 BRANCHES="$LOCAL=RW"
