@@ -63,13 +63,19 @@ for no in ("FitGirl Repack", "Repack B", "Repack C", "Mystery"):
     elif rows.get(no): fails.append("%s marked playable" % no)
 
 # a manifest that says "not runnable yet" still wins over detection
-json.dump({"Celeste": {"kind": "wizard", "entry": "setup.exe"}}, open(G + "/PC/.manifest.json", "w"))
+# "wizard" is a real verdict; "unknown" is just the pipeline not knowing, so detection still runs
+json.dump({"Celeste": {"kind": "wizard", "entry": "setup.exe"},
+           "Morrowind": {"kind": "unknown"}}, open(G + "/PC/.manifest.json", "w"))
 import importlib; importlib.reload(L)
 rows2 = {r.name: r.playable for r in L.scan()[0]}
 print("  manifest marks Celeste a wizard -> playable=%s (shown=%s)"
       % (rows2.get("Celeste"), "Celeste" in rows2))
 if rows2.get("Celeste"): fails.append("manifest 'wizard' verdict was ignored")
 if "Celeste" not in rows2: fails.append("Celeste hidden instead of shown as not built")
+print("  manifest says Morrowind is 'unknown' -> playable=%s (detection must still run)"
+      % rows2.get("Morrowind"))
+if not rows2.get("Morrowind"):
+    fails.append("'unknown' treated as a denial - a runnable game was hidden")
 
 shutil.rmtree(root, ignore_errors=True)
 print("FAIL: " + "; ".join(fails) if fails else "PASS")

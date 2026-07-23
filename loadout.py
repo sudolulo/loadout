@@ -1106,8 +1106,11 @@ def scan():
     PLAYABLE = {"linux", "portable", "windows", "installed"}
     manifest_says = {k for k, v in manifest.items()
                      if isinstance(v, dict) and v.get("kind") in PLAYABLE and v.get("entry")}
+    # Only "wizard" is a real verdict of not-runnable-yet. "unknown" means the pipeline could
+    # not classify it -- ignorance, not a denial -- so those fall through to looking in the
+    # folder ourselves. (Viva New Vegas is filed unknown and runs ModOrganizer.exe perfectly.)
     manifest_denies = {k for k, v in manifest.items()
-                       if isinstance(v, dict) and v.get("kind") not in PLAYABLE}
+                       if isinstance(v, dict) and v.get("kind") == "wizard"}
     seen = set()
     pc_bases = ((PC_NAS, *PC_LOCALS) if _mount_responsive(PC_NAS) else tuple(PC_LOCALS))
     for base in pc_bases:
