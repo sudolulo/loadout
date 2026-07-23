@@ -14,9 +14,9 @@ export XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/us
 
 # --- resolve tier paths from the shared config (single source of truth) --------------------
 # Inline python3 mirrors the GUI's defaults + SD auto-detect and prints shell assignments.
-# (python3 ships on SteamOS, so no jq dependency.) Auto-detect only picks a mount that
-# already holds an Emulation/roms(-local) tree, so it never provisions a stray USB stick;
-# to point the SD tier somewhere fresh, set "rom_sd" in the config to an explicit path.
+# (python3 ships on SteamOS, so no jq dependency.) Auto-detect only considers the Deck's own card
+# mount, so it never provisions a stray USB stick; to point the SD tier somewhere else, set
+# "rom_sd" / "pc_sd" in the config to an explicit path (or "off" to disable the tier).
 eval "$(python3 - <<'PY'
 import json, os, glob
 CFG = os.path.expanduser(os.environ.get("LOADOUT_CONFIG",
@@ -64,12 +64,14 @@ def sd_dir(subs, default):
     return os.path.join(ROOT, default)
 
 
-# a card mirrors the share: <card>/ROMs and <card>/PC
+# a card mirrors the Deck: <card>/Emulation/ROMs (beside the bios/saves/tools it belongs with)
+# and <card>/Games/PC
 sd = "" if off(c["rom_sd"]) else (os.path.expanduser(c["rom_sd"]) if (c["rom_sd"] or "").strip()
-     else sd_dir(("ROMs", "roms", "Emulation/roms-local", "Emulation/roms"), "ROMs"))
+     else sd_dir(("Emulation/ROMs", "Emulation/roms", "Emulation/roms-local", "ROMs", "roms"),
+                 "Emulation/ROMs"))
 pcsd = "" if off(c.get("pc_sd", "")) else (
     os.path.expanduser(c["pc_sd"]) if (c.get("pc_sd") or "").strip()
-    else sd_dir(("PC", "pc", "Games/PC", "Games/.pc-local"), "PC"))
+    else sd_dir(("Games/PC", "Games/.pc-local", "PC", "pc"), "Games/PC"))
 
 
 def q(s):
@@ -124,7 +126,8 @@ mkdir -p "$LOCAL" "$UNION"
 # retire the previous NAS tier name (.nas-roms) once it's unmounted and empty
 rmdir "$(dirname "$NAS")/.nas-roms" 2>/dev/null && echo "  removed legacy .nas-roms"
 
-# SD branches use the card's REAL path (<card>/ROMs, <card>/PC) -- the tiers are hidden plumbing and
+# SD branches use the card's REAL path (<card>/Emulation/ROMs, <card>/Games/PC) -- the tiers are
+# hidden plumbing and
 # mergerfs wants the actual path, so a symlink would be indirection with no payoff. Create the dir
 # on a card we've identified; if there's no card the branch simply drops out.
 [ -n "$SD" ] && mkdir -p "$SD" 2>/dev/null

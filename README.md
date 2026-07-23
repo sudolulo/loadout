@@ -28,10 +28,11 @@ jump sections), disk = **Start** (keyboard: `d`).
 ## Overlays — `mount-setup.sh`
 A mergerfs union at `~/Emulation/roms` across up to three tiers: **Internal** (RW) → **SD card**
 (RW, optional) → a read-only rclone mount of the **NAS**. New downloads appear automatically;
-anything not held locally streams. The SD card is **auto-detected** (the first Deck mount holding
-an `Emulation/roms(-local)` tree); set `rom_sd` in the config to force a path or `"off"` to skip
-it. All tier paths come from the same `config.json` the GUI reads, so setup and manager always
-agree. No SD is fine (Internal + NAS); no NAS is fine too (local-only union — see below). The
+anything not held locally streams. The SD card is **auto-detected** and mirrors the Deck's own
+layout — `<card>/Emulation/ROMs` for ROMs (beside the bios/saves/tools they belong with) and
+`<card>/Games/PC` for PC games — with the older EmuDeck folder names honoured so an existing card
+keeps working; set `rom_sd` in the config to force a path or `"off"` to skip it. All tier paths
+come from the same `config.json` the GUI reads, so setup and manager always agree. No SD is fine (Internal + NAS); no NAS is fine too (local-only union — see below). The
 **NAS itself is set up from inside the app** — see *NAS setup* below.
 
 ## Steam shortcuts — `steam-refresh.sh`, `fix_collections.py`
@@ -87,7 +88,8 @@ Two config keys govern the SD tier. `rom_sd`: `""` auto-detects the Deck SD, an 
 forces it, `"off"` disables it. `default_target` (`"sd"` / `"internal"`): the disk a newly
 pulled-offline game defaults to when an SD exists — and you can flip any individual game with
 **Start** (or `d`) in the GUI. Games already on the SD (e.g. an existing EmuDeck library) show
-as local and playable. PC games stay on internal storage.
+as local and playable — the card's existing folder is used as-is rather than moved. `pc_sd` does
+the same for the PC union.
 
 ### Cover art (SteamGridDB)
 Drop your SteamGridDB API key in `~/.config/loadout/steamgriddb.key` (or set `$LOADOUT_SGDB_KEY`)

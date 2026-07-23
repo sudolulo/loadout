@@ -2,6 +2,14 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.11.2] - 2026-07-23
+### Changed
+- **The SD card now mirrors the Deck's own layout**: `<card>/Emulation/ROMs` for the ROM library
+  and `<card>/Games/PC` for PC games, so a card reads the same way as `~/Emulation` + `~/Games`.
+  0.11.1 put ROMs at `<card>/ROMs`, which would have split them from the `bios`, `saves`,
+  `storage` and `tools` that live beside them in the card's `Emulation/`. Older EmuDeck folder
+  names are still detected first, so an existing card is used where it stands — never moved.
+
 ## [0.11.1] - 2026-07-23
 ### Added
 - **SD-card tiers for both unions.** When a card is present it joins the ROM and PC unions as a

@@ -70,7 +70,8 @@ _DEFAULTS = {
                                                 #   the union (rom_union) is the only ROM dir you
                                                 #   should ever browse; the tiers are plumbing.
     "rom_sd":      "",                          # SD-card ROM branch: "" = auto-detect the card
-                                                #   (<card>/ROMs), an explicit path forces it,
+                                                #   (<card>/Emulation/ROMs), an explicit path
+                                                #   forces it,
                                                 #   "off" = internal + NAS only
     "rom_nas":     "~/Emulation/.roms-nas",     # read-only NAS branch (rclone mount), hidden
     "rom_rclone_remote": "",                    # rclone "remote:path" for the NAS tier, set by
@@ -85,7 +86,8 @@ _DEFAULTS = {
     # PC mirrors the Emulation layout exactly: a parent dir holding the UNION you browse plus the
     # hidden tiers that feed it.  ~/Games/PC  <-  .pc-local + .pc-sd + .pc-nas
     "pc_local":    "~/Games/.pc-local",         # writable INTERNAL PC branch (hidden)
-    "pc_sd":       "",                          # SD-card PC branch: "" = auto-detect (<card>/PC)
+    "pc_sd":       "",                          # SD-card PC branch: "" = auto-detect
+                                                #   (<card>/Games/PC)
     "pc_nas":      "~/Games/.pc-nas",           # read-only NAS PC branch (rclone mount, hidden)
     "pc_rclone_remote": "",                     # rclone "remote:path" for the PC NAS tier, e.g.
                                                 #   games:games/PC. "" / "off" = no NAS PC tier.
@@ -143,13 +145,16 @@ def _sd_root():
 
 
 def _detect_sd(kind="rom"):
-    """The card's ROM or PC dir. A card mirrors the share's layout -- <card>/ROMs and <card>/PC --
-    with the older EmuDeck locations accepted so an existing card keeps working."""
+    """The card's ROM or PC dir. A card mirrors the Deck's own layout -- <card>/Emulation/ROMs and
+    <card>/Games/PC -- with the older EmuDeck locations accepted so an existing card keeps
+    working."""
     root = _sd_root()
     if not root:
         return ""
-    subs = ("ROMs", "roms", "Emulation/roms-local", "Emulation/roms") if kind == "rom" \
-        else ("PC", "pc", "Games/PC", "Games/.pc-local")
+    # a card mirrors the Deck: Emulation/ROMs for the ROM library (beside the bios/saves/tools it
+    # belongs with) and Games/PC for PC games. Older EmuDeck spellings still match.
+    subs = ("Emulation/ROMs", "Emulation/roms", "Emulation/roms-local", "ROMs", "roms") \
+        if kind == "rom" else ("Games/PC", "Games/.pc-local", "PC", "pc")
     for s in subs:
         p = os.path.join(root, s)
         if os.path.isdir(p):
