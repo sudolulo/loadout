@@ -6,8 +6,9 @@ and (for PC) automated installs.
 
 ## The GUI — `loadout.py`
 1280×800, fully drivable from the pad. A left **sidebar** groups navigation into **LIBRARY**
-(PC Games, Collections, and a section per console) and **SYSTEM** (Saves, and **Storage** —
-the union tiers, a rebuild action, and NAS setup). **D-pad Left** focuses the sidebar (Up/Down
+(PC Games, Collections, and a section per console) and **SYSTEM** (Saves, **Storage** — union
+tiers, rebuild, prune, diagnostics — and **Settings** — the SMB share, SteamGridDB key, default
+disk and SD-card toggle). **D-pad Left** focuses the sidebar (Up/Down
 walk the sections, with a live preview); **Right** or **A** drops into the list; the **L1/R1**
 bumpers jump straight between sections from anywhere. Two per-game toggles:
 
@@ -28,7 +29,8 @@ folder** (native Linux binary first, else the largest non-installer `.exe`), so 
 optional — and an un-installed repack, whose only executables are `setup.exe` and archive tools,
 stays hidden until it is installed.
 Rescan = **⧉ View**, Apply = **Y**, Close = **B**, sidebar = **D-pad ←/→** (bumpers **L1/R1**
-jump sections), disk = **Start** (keyboard: `d`).
+jump sections), disk = **Start** (keyboard: `d`), **L2/R2** jump to the next starting letter.
+A copy running in the background shows live in the header.
 
 ## Overlays — `mount-setup.sh`
 A mergerfs union at `~/Emulation/roms` across up to three tiers: **Internal** (RW) → **SD card**

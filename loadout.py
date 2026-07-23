@@ -778,7 +778,8 @@ class Gamepad(threading.Thread):
         # copy disk (SD/Internal) -- safe to bind because it only stages a choice; nothing copies or
         # deletes until Apply (Y) is confirmed. Apply itself stays on Y so it's never one stray press.
         BTN = {e.BTN_SOUTH: "a", e.BTN_EAST: "b", e.BTN_NORTH: "x", e.BTN_WEST: "y",
-               e.BTN_TL: "l1", e.BTN_TR: "r1", e.BTN_SELECT: "select", e.BTN_START: "start"}
+               e.BTN_TL: "l1", e.BTN_TR: "r1", e.BTN_SELECT: "select", e.BTN_START: "start",
+               e.BTN_TL2: "l2", e.BTN_TR2: "r2"}
         # some controllers report the D-pad as buttons rather than the ABS_HAT0 axes; handle both.
         DPAD = {}
         for code, act in (("BTN_DPAD_UP", ("move", -1)), ("BTN_DPAD_DOWN", ("move", 1)),
@@ -937,7 +938,7 @@ class Row:
             self.size = du(src) if os.path.isdir(src) else (
                 os.path.getsize(src) if os.path.exists(src) else 0)
             self.n_files = 1
-            self.label = name if self.playable else name + "        — not installed"
+            self.label = name
             # a PC game "shows in Steam" when its generated launcher exists
             if kind == "pc":
                 self.is_steam = os.path.exists(pc_pick(name))
@@ -1313,8 +1314,8 @@ class Page(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.app = app
         self.steam_col = steam_col
-        # cols: offline(bool) steam(bool) name where size obj cover(pixbuf)
-        self.store = Gtk.ListStore(bool, bool, str, str, str, object, GdkPixbuf.Pixbuf)
+        # cols: offline(bool) steam(bool) name where size obj cover(pixbuf) fg(colour)
+        self.store = Gtk.ListStore(bool, bool, str, str, str, object, GdkPixbuf.Pixbuf, str)
         self.view = Gtk.TreeView(model=self.store)
         self.view.set_activate_on_single_click(True)
         self.view.set_enable_search(False)
@@ -1332,7 +1333,7 @@ class Page(Gtk.Box):
         t.set_property("xpad", 14)
         t.connect("toggled", self.on_toggled)
         self.off_col = Gtk.TreeViewColumn("Offline", t, active=0)
-        self.off_col.set_min_width(120)
+        self.off_col.set_min_width(78)
         self.view.append_column(self.off_col)
         self.steam_toggle_col = None
         if steam_col:
@@ -1340,17 +1341,23 @@ class Page(Gtk.Box):
             t2.set_property("xpad", 14)
             t2.connect("toggled", self.on_steam_toggled)
             self.steam_toggle_col = Gtk.TreeViewColumn("Steam", t2, active=1)
-            self.steam_toggle_col.set_min_width(110)
+            self.steam_toggle_col.set_min_width(72)
             self.view.append_column(self.steam_toggle_col)
         for i, (title, expand, width) in enumerate(
-                (("Name", True, 420), ("Where", False, 140), ("Size", False, 140)), start=2):
+                (("Name", True, 240), ("Where", False, 132), ("Size", False, 108)), start=2):
             r = Gtk.CellRendererText()
             r.set_property("ypad", 10)
-            if i == 1:
+            if title == "Name":
+                # WITHOUT this a long ROM name expands the column until "Where" and "Size" are
+                # pushed off the edge of a 1280px screen -- the guard used to test the wrong
+                # index and never fired, so on a Deck you could not see where a game lived.
                 r.set_property("ellipsize", Pango.EllipsizeMode.END)
-            c = Gtk.TreeViewColumn(title, r, text=i)
+            c = Gtk.TreeViewColumn(title, r, text=i, foreground=7)
             c.set_expand(expand)
             c.set_min_width(width)
+            if not expand:
+                c.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+                c.set_fixed_width(width)
             self.view.append_column(c)
 
         sw = Gtk.ScrolledWindow()
@@ -1358,6 +1365,9 @@ class Page(Gtk.Box):
         sw.add(self.view)
         self.pack_start(sw, True, True, 0)
         self.empty = Gtk.Label(label=empty_text)
+        self.empty.set_line_wrap(True)
+        self.empty.set_max_width_chars(60)
+        self.empty.set_no_show_all(True)       # show_all() must not resurrect it over a full list
         self.empty.get_style_context().add_class("hint")
         self.pack_start(self.empty, False, False, 8)
         self.rows = []
@@ -1388,8 +1398,10 @@ class Page(Gtk.Box):
         self.rows = rows
         self.store.clear()
         for r in rows:
+            dim = not getattr(r, "playable", True)
             self.store.append([r.is_local, getattr(r, "is_steam", False),
-                               getattr(r, "label", r.name), "", human(r.size), r, None])
+                               getattr(r, "label", r.name), "", human(r.size), r, None,
+                               "#6b7280" if dim else None])
         for i in range(len(rows)):
             self.store[i][3] = self._where(i)
         self.empty.set_visible(not rows)
@@ -1753,25 +1765,37 @@ class StoragePage(Gtk.Box):
     steam_col = False
     view = None
 
-    def __init__(self, app):
+    def __init__(self, app, mode="storage"):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.app = app
+        self.mode = mode                       # "storage" = what exists; "settings" = what to change
         self.rows = []
         self.set_border_width(16)
         self._remote_name = "games"
 
+        # The page scrolls; the buttons do NOT. Everything used to be packed straight into the
+        # window, so on a 1280x800 Deck the fields alone were 831px tall and every button --
+        # Test, Save, Rebuild, Prune, Diagnostics -- sat below the bottom edge, unreachable.
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self._body = body
         self.status = Gtk.Label(xalign=0)
         self.status.get_style_context().add_class("big")
         self.status.set_line_wrap(True)
-        self.pack_start(self.status, False, False, 0)
+        self.status.set_max_width_chars(72)
+        if mode == "storage":
+            body.pack_start(self.status, False, False, 0)
         self.detail = Gtk.Label(xalign=0)          # one block per tier: path / mode / free / systems
         self.detail.set_line_wrap(True)
-        self.pack_start(self.detail, False, False, 0)
+        self.detail.set_max_width_chars(84)        # long NAS paths must wrap, not widen the app
+        self.detail.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        if mode == "storage":
+            body.pack_start(self.detail, False, False, 0)
 
         # --- SMB share: where the NAS tier comes from. Loadout owns this connection. ---
         hdr = Gtk.Label(xalign=0)
         hdr.set_markup("<b>NAS share (SMB)</b>")
-        self.pack_start(hdr, False, False, 0)
+        if mode == "settings":
+            body.pack_start(hdr, False, False, 0)
         grid = Gtk.Grid(column_spacing=10, row_spacing=4)
         self.e_host = Gtk.Entry(); self.e_share = Gtk.Entry(); self.e_pcshare = Gtk.Entry()
         self.e_saves = Gtk.Entry(); self.e_user = Gtk.Entry(); self.e_pass = Gtk.Entry()
@@ -1786,31 +1810,47 @@ class StoragePage(Gtk.Box):
                 ("SteamGridDB key", self.e_sgdb, "(optional - enables cover art)"))):
             grid.attach(Gtk.Label(label=lbl, xalign=1), 0, i, 1, 1)
             ent.set_hexpand(True)
+            ent.set_width_chars(20)                # a hint, not a demand: keeps the page narrow
             ent.set_placeholder_text(ph)
             grid.attach(ent, 1, i, 1, 1)
         for secret in (self.e_pass, self.e_sgdb):
             secret.set_visibility(False)
             secret.set_input_purpose(Gtk.InputPurpose.PASSWORD)
-        self.pack_start(grid, False, False, 0)
+        if mode == "settings":
+            body.pack_start(grid, False, False, 0)
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.set_min_content_height(120)             # may shrink: the window must never outgrow 800
+        sw.add(body)
+        self._scroller = sw
+        self.pack_start(sw, True, True, 0)
 
         self.btns = []
-        brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        brow = Gtk.FlowBox()                       # wraps to a second row rather than off-screen
+        brow.set_selection_mode(Gtk.SelectionMode.NONE)
+        brow.set_column_spacing(8)
+        brow.set_row_spacing(8)
+        brow.set_max_children_per_line(4)
         self.b_disk = Gtk.Button(label="Default disk")
         self.b_sd = Gtk.Button(label="SD card")
-        for label, cb in (("Test", self.test_nas), ("Save & mount", self.save_nas),
-                          ("Rebuild union", self.rebuild), ("Prune empty", self.prune),
-                          (None, self.cycle_default_disk), (None, self.toggle_sd),
-                          ("Diagnostics", self.diagnostics)):
+        actions = (("Test", self.test_nas), ("Save & mount", self.save_nas),
+                   (None, self.cycle_default_disk), (None, self.toggle_sd)) \
+            if mode == "settings" else \
+            (("Rebuild union", self.rebuild), ("Prune empty", self.prune),
+             ("Diagnostics", self.diagnostics))
+        for label, cb in actions:
             b = self.b_disk if cb == self.cycle_default_disk else (
                 self.b_sd if cb == self.toggle_sd else Gtk.Button(label=label))
             b.set_size_request(170, 52)
             b.connect("clicked", lambda _w, f=cb: f())
             self.btns.append(b)
-            brow.pack_start(b, False, False, 0)
-        self.pack_start(brow, False, False, 0)
+            brow.insert(b, -1)
+        self.pack_start(brow, False, False, 0)     # pinned: always on screen
         # the pad walks the text fields too, so the share can be typed with the on-screen keyboard
-        self.focusables = [self.e_host, self.e_share, self.e_pcshare, self.e_saves,
-                           self.e_user, self.e_pass, self.e_sgdb] + self.btns
+        fields = [self.e_host, self.e_share, self.e_pcshare, self.e_saves,
+                  self.e_user, self.e_pass, self.e_sgdb] if mode == "settings" else []
+        self.focusables = fields + self.btns
         self._sync_policy_labels()
         # A text field that CANNOT take focus cannot raise Steam's on-screen keyboard -- not
         # via our own navigation, and not via any GTK path that focuses the first focusable
@@ -1849,6 +1889,13 @@ class StoragePage(Gtk.Box):
     def move_focus(self, delta):
         self.focus = max(0, min(len(self.focusables) - 1, self.focus + delta))
         self.highlight()
+
+    def show_top(self):
+        """Open at the top: a page that restores a mid-scroll position hides its own heading."""
+        try:
+            self._scroller.get_vadjustment().set_value(0)
+        except Exception:
+            pass
 
     def highlight(self):
         """Show which field/button the pad is on WITHOUT focusing a text entry.
@@ -2260,6 +2307,8 @@ class App(Gtk.Window):
 
         self.title = Gtk.Label(xalign=0)
         self.title.get_style_context().add_class("big")
+        self.title.set_ellipsize(Pango.EllipsizeMode.END)
+        self.title.set_max_width_chars(20)     # a hint; ellipsize keeps it from widening the app
         outer.pack_start(self.title, False, False, 0)
 
         self.bar = Gtk.LevelBar()
@@ -2280,7 +2329,8 @@ class App(Gtk.Window):
         self.pc_page = Page(self, _pc_empty_text(), steam_col=True)
         self.rom_page = Page(self, "No console collections found.")
         self.saves_page = SavesPage(self)
-        self.storage_page = StoragePage(self)
+        self.storage_page = StoragePage(self, mode="storage")
+        self.settings_page = StoragePage(self, mode="settings")
 
         # reuse this one scan for the initial load below (startup scans the mounts once)
         _pc0, _roms0, _by = scan()
@@ -2295,6 +2345,7 @@ class App(Gtk.Window):
         self._nav_header("SYSTEM")
         self._nav_add("saves", self.saves_page, "Saves")
         self._nav_add("storage", self.storage_page, "Storage")
+        self._nav_add("settings", self.settings_page, "Settings")
 
         _side = Gtk.ScrolledWindow()
         _side.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -2306,6 +2357,8 @@ class App(Gtk.Window):
         outer.pack_start(_split, True, True, 0)
         self.pages = [e["page"] for e in self.nav]
         self.focus_label = Gtk.Label(xalign=0)
+        self.focus_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.focus_label.set_max_width_chars(20)
         self.focus_label.get_style_context().add_class("hint")
         outer.pack_start(self.focus_label, False, False, 0)
 
@@ -2334,7 +2387,10 @@ class App(Gtk.Window):
         hint = Gtk.Label(xalign=0)
         _disk = "    •    Start = disk (SD/Internal)" if (HAVE_SD or HAVE_PC_SD) else ""
         hint.set_text("D-pad = move    •    L1/R1 = switch section    •    A = keep Offline    •    "
-                      "X = show in Steam" + _disk + "    •    Y = apply    •    B = back")
+                      "X = show in Steam" + _disk + "    •    L2/R2 = jump letter"
+                      "    •    Y = apply    •    B = back")
+        hint.set_ellipsize(Pango.EllipsizeMode.END)
+        hint.set_max_width_chars(20)
         hint.get_style_context().add_class("hint")
         outer.pack_start(hint, False, False, 0)
 
@@ -2361,6 +2417,8 @@ class App(Gtk.Window):
         self.reload(prescanned=(_pc0, _roms0, _by))
         self.pad = Gamepad(self)
         self.pad.start()
+        self._last_note = ""
+        GLib.timeout_add_seconds(3, self._tick_worker)   # live copy progress in the header
         # Non-blocking self-update check: if a newer AppImage release exists, offer it (U).
         self.update_info = None
         threading.Thread(target=self._check_update, daemon=True).start()
@@ -2429,6 +2487,8 @@ class App(Gtk.Window):
 
     def _grab(self):
         pg = self.page()
+        if getattr(pg, "show_top", None):
+            pg.show_top()
         if getattr(pg, "is_panel", False):
             pg.highlight()
         elif getattr(pg, "view", None) is not None:
@@ -2477,6 +2537,8 @@ class App(Gtk.Window):
             self.toggle_steam_current()
         elif name == "y":
             self.on_apply(None)
+        elif name in ("l2", "r2"):
+            self.jump_letter(-1 if name == "l2" else 1)
         elif name == "l1":
             self.prev_nav()
         elif name == "r1":
@@ -2520,7 +2582,11 @@ class App(Gtk.Window):
         elif getattr(pg, "is_saves", False):
             self.focus_label.set_text("A = run the highlighted backup / restore" + nav)
         elif getattr(pg, "is_panel", False):
-            self.focus_label.set_text("A = rebuild the union" + nav)
+            # the two panels do different things; saying "rebuild the union" on Settings was
+            # simply wrong once the page was split
+            self.focus_label.set_text(
+                ("A = type into the field / press the button" if getattr(pg, "mode", "") == "settings"
+                 else "A = run the highlighted action") + nav)
         else:
             self.focus_label.set_text("A = keep this collection Offline" + disk + nav)
 
@@ -2659,8 +2725,61 @@ class App(Gtk.Window):
         self.bar.set_max_value(max(total_bytes(), 1))
         self.bar.set_value(max(0, min(used, total_bytes())))
         self.title.set_markup(
-            "Keep offline: <b>%s</b>     Free now: <b>%s</b>     After apply: <b>%s</b>"
-            % (human(want), human(free_bytes()), human(max(projected, 0))))
+            "Keep offline: <b>%s</b>     Free now: <b>%s</b>     After apply: <b>%s</b>%s"
+            % (human(want), human(free_bytes()), human(max(projected, 0)), self._work_note()))
+
+    def _tick_worker(self):
+        note = self._work_note()
+        if note != getattr(self, "_last_note", None):
+            self._last_note = note
+            self.update_totals()               # only redraw when the text actually changed
+        return True
+
+    def _work_note(self):
+        """What the background worker is doing, in the header. Copies run in a systemd service,
+        so without this the only way to know anything is happening is to reopen the app and hunt
+        for it."""
+        try:
+            with open(PROGRESS) as f:
+                p = json.load(f)
+        except Exception:
+            return ""
+        state = p.get("state", "")
+        if state in ("", "idle") or time.time() - p.get("updated", 0) > 120:
+            return ""
+        name = str(p.get("name", ""))[:28]
+        done, total = p.get("item_done", 0), p.get("item_total", 0) or 0
+        pct = (" %d%%" % (100 * done / total)) if total else ""
+        verb = {"copying": "Copying", "moving": "Moving", "freeing": "Freeing"}.get(state, state)
+        rate = p.get("rate") or 0
+        speed = ("  %s/s" % human(rate)) if rate else ""
+        return ("     <span foreground='#fbbf24'>%s %s%s%s</span>"
+                % (verb, GLib.markup_escape_text(name), pct, speed))
+
+    def jump_letter(self, direction):
+        """Skip to the next/previous starting letter. A console folder can hold thousands of
+        ROMs; without this the only way to reach the far end of the alphabet is to hold a
+        direction and wait."""
+        pg = self.page()
+        if getattr(pg, "view", None) is None or not getattr(pg, "rows", None):
+            return
+        sel = pg.view.get_selection().get_selected()[1]
+        i = int(str(pg.store.get_path(sel))) if sel is not None else 0
+        def key(n):
+            t = str(getattr(pg.rows[n], "label", pg.rows[n].name)).strip().upper()
+            return t[0] if t else "#"
+        here = key(i)
+        rng = range(i + 1, len(pg.rows)) if direction > 0 else range(i - 1, -1, -1)
+        target = next((n for n in rng if key(n) != here), None)
+        if target is None:
+            return
+        if direction < 0:                       # land on the FIRST row of that letter, not the last
+            letter = key(target)
+            while target > 0 and key(target - 1) == letter:
+                target -= 1
+        path = Gtk.TreePath.new_from_indices([target])
+        pg.view.set_cursor(path)
+        pg.view.scroll_to_cell(path, None, True, 0.5, 0)
 
     def on_key(self, _w, ev):
         k = Gdk.keyval_name(ev.keyval) or ""
