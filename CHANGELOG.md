@@ -2,6 +2,12 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.4.1] - 2026-07-23
+### Changed
+- Faster startup. The library is scanned once at launch instead of twice, and the Saves
+  status (which hits the NAS over rclone and was the slowest, most variable startup cost)
+  now loads in the background instead of blocking the window.
+
 ## [0.4.0] - 2026-07-23
 ### Changed
 - **Renamed the project from `offline-manager` to Loadout.** Config lives at

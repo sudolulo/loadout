@@ -897,13 +897,25 @@ class SavesPage(Gtk.Box):
 
     # ---- state ----
     def refresh(self):
-        import subprocess
+        """Fetch save status in the background (it hits the NAS over rclone, which is slow
+        and network-bound) so it never blocks startup; the labels fill in when it returns."""
+        if getattr(self, "_refreshing", False):
+            return
+        self._refreshing = True
+        self.status.set_markup("<small>checking saves…</small>")
+        threading.Thread(target=self._refresh_work, daemon=True).start()
+
+    def _refresh_work(self):
         try:
             out = subprocess.run(["bash", SAVES_SCRIPT, "status"],
                                  capture_output=True, text=True, timeout=90).stdout
             kv = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
         except Exception:
             kv = {}
+        GLib.idle_add(self._refresh_apply, kv)
+
+    def _refresh_apply(self, kv):
+        self._refreshing = False
         lb, when, where = kv.get("last_backup", ""), "never", ""
         if lb and lb != "none":
             try:
@@ -936,6 +948,7 @@ class SavesPage(Gtk.Box):
                                  "pushed automatically when you close your next game.</small>")
         else:
             self.warn.set_markup("<small>In sync with the NAS.</small>")
+        return False
 
     def run(self, action):
         if self.busy:
@@ -992,8 +1005,9 @@ class App(Gtk.Window):
         self.rom_page = Page(self, "No console collections found.")
         self.nb.append_page(self.pc_page, Gtk.Label(label="  PC Games  "))
         self.nb.append_page(self.rom_page, Gtk.Label(label="  Collections  "))
-        # one tab per large console that actually has games (built from a first scan)
-        _, _, _by = scan()
+        # one tab per large console that actually has games (built from a first scan);
+        # reuse this scan for the initial load below so startup scans the mounts only once
+        _pc0, _roms0, _by = scan()
         self.console_pages = {}
         for sysid in TAB_ORDER:
             if sysid in _by:
@@ -1051,7 +1065,7 @@ class App(Gtk.Window):
         self.busy = False
         self.connect("delete-event", lambda *_: (self.quit_app(), True)[1])
         self.connect("key-press-event", self.on_key)
-        self.reload()
+        self.reload(prescanned=(_pc0, _roms0, _by))
         self.pad = Gamepad(self)
         self.pad.start()
         # Non-blocking self-update check: if a newer AppImage release exists, offer it (U).
@@ -1228,13 +1242,13 @@ class App(Gtk.Window):
         else:
             self.sync_label.set_text("")
 
-    def reload(self):
+    def reload(self, prescanned=None):
         if os.path.exists(QUEUE):
             GLib.timeout_add(1000, self.poll_progress)
         freed = sweep_partials()
         if freed:
             self.show_banner("Cleaned up %s of interrupted copy data." % human(freed), "error")
-        pc, roms, by_system = scan()
+        pc, roms, by_system = prescanned if prescanned else scan()
         self.pc_page.load(pc)
         self.rom_page.load(roms)
         for sysid, pg in self.console_pages.items():
