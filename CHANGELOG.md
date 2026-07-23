@@ -2,6 +2,36 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.14.0] - 2026-07-23
+### Fixed
+- **Save sync has been broken since 0.7.2 and now works again.** Containerising Loadout deleted
+  the helper scripts it used to copy into `$HOME`, but three bundled scripts still reached into
+  `$HOME` for them: `deck-saves.sh` looked for `~/steam-account.py` (so every run died with
+  "cannot determine the signed-in Steam account"), the saves daemon looked for `~/deck-saves.sh`,
+  and `switch-setup.sh` looked for `~/register-switch.py`. They all resolve inside the AppImage
+  now. A `saves_script` config key that pointed at `~` and was already overridden is gone.
+- **A "portable" PC game that is really a Windows `.exe` now gets Proton.** Whether a game needs
+  Proton is decided by its executable, not by the manifest's label — several titles are filed as
+  `portable` while shipping a Windows binary, and they were being launched with no Proton at all.
+### Changed
+- **PC games are added to Steam the normal way, so their saves live where every other game's do.**
+  Loadout no longer generates a Proton wrapper script with its own `STEAM_COMPAT_DATA_PATH` under
+  `~/.proton-prefixes`. The shortcut runs the game's **own executable** (through the union), and a
+  Windows title gets a **Steam compatibility tool** written to `config.vdf` — so Steam creates and
+  owns the prefix at `steamapps/compatdata/<appid>`, saves land in the standard place, and the
+  Proton version can be changed from Steam's own UI.
+  Ownership is tracked by **recorded appid**, never by path, so a shortcut you made by hand for a
+  game in the same folder can never be mistaken for Loadout's and removed. Existing generated
+  launchers are converted to picks and deleted on the next run.
+- **PC save sync follows.** It backs up the Proton prefixes of **non-Steam shortcuts** from
+  `steamapps/compatdata` (identified by the high bit Steam sets on shortcut appids), filtered to
+  the user profile. Real Steam games are left to Steam Cloud, and with no non-Steam prefixes the
+  key is dropped entirely rather than degenerating into "sync every prefix".
+### Added
+- `tests/` — the suite lives in the repo now, with `tests/run.sh`. Covers the shortcut writer,
+  disk moves (including the data-loss cases), the compat-tool editor, save filtering, and the
+  Game-Mode keyboard behaviour.
+
 ## [0.13.1] - 2026-07-23
 ### Fixed
 - **Harder guarantee that the settings page cannot raise the on-screen keyboard.** 0.11.3 stopped

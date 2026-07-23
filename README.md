@@ -41,8 +41,10 @@ come from the same `config.json` the GUI reads, so setup and manager always agre
 Loadout manages your Steam shortcuts **natively — no Steam ROM Manager needed, ever**. For ROMs it
 learns each system's launch template from your existing shortcuts and writes matching ones
 itself (with built-in EmuDeck templates so a fresh device works too), so games launch
-identically. PC games get a generated launcher (Proton-wrapped for Windows titles) pointed at
-**through the union**, so moving a game between disks never breaks its shortcut. On exit, a flag-watched systemd path unit runs `Loadout.AppImage --refresh`
+identically. A PC game is added the normal way — the shortcut runs the game's own executable
+(through the union, so moving it between disks never breaks the shortcut), and a Windows title
+gets a Steam **compatibility tool** so Steam owns its Proton prefix and its saves land in
+`steamapps/compatdata` like every other game's. On exit, a flag-watched systemd path unit runs `Loadout.AppImage --refresh`
 (`steam-refresh.sh` from inside the AppImage) which — with Steam briefly stopped, guarded
 against a live game — reconciles Steam shortcuts with what you've enabled, drops any stale
 `offline-manager` shortcut, fetches cover art, writes per-console collections, clears its flag,
@@ -51,8 +53,9 @@ and returns you to Game Mode (or restarts Steam on the desktop) exactly once.
 ## Saves — `deck-saves.sh`, `deck-saves-daemon.sh`, `steam-account.py`
 Game saves synced to the NAS under the **signed-in Steam account**, so a profile resumes on
 whichever Deck you pick up. Emulator saves (`~/Emulation/{saves,storage}`) plus Windows-game saves
-from inside Loadout's Proton prefixes — filtered to the user profile, so the ~1 GB Windows install
-in each prefix is never uploaded and ordinary prefix churn never reads as unsynced progress. The daemon pushes on game exit, pulls on idle when the NAS is newer,
+from the Proton prefixes Steam keeps for **non-Steam shortcuts** in `steamapps/compatdata` —
+filtered to the user profile, so the ~1 GB Windows install in each prefix is never uploaded and
+ordinary prefix churn never reads as unsynced progress. Real Steam games are Steam Cloud's job. The daemon pushes on game exit, pulls on idle when the NAS is newer,
 and hands the save tree over on a profile switch — never mid-game, never over unsynced progress.
 
 ## Wizard PC installs — `wizard/`
@@ -68,7 +71,8 @@ your home directory and no script in `~` is ever run**; all logic lives inside t
 what runs is always the code in the AppImage you're running. It updates itself: on launch it
 checks the releases API and, with your OK (**U**), sha256-verifies and replaces itself in place.
 
-Build it with `packaging/build-appimage.sh` (needs `appimagetool`). Subcommands:
+Build it with `packaging/build-appimage.sh` (needs `appimagetool`), release it with
+`packaging/release.sh`, and run the suite with `tests/run.sh`. Subcommands:
 `--worker | --refresh | --saves-daemon | --update | --sync-steam | --mount-setup | --install`.
 
 Then, once: open **Storage → Set up NAS share…** to point Loadout at your NAS, and add

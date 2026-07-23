@@ -8,7 +8,8 @@
 # Never touches saves while a game is running, and never overwrites local progress that
 # was not pushed yet -- that is flagged as a conflict for the manager to settle.
 set -u
-SAVES="$HOME/deck-saves.sh"
+# bundled beside this script inside the AppImage, never a copy in $HOME
+SAVES="${LOADOUT_APP:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/deck-saves.sh"
 INTERVAL=60
 was_running=0
 

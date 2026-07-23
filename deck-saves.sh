@@ -1,9 +1,9 @@
 #!/bin/bash
 # Game saves on the NAS, filed under the Steam account that is actually signed in.
 #
-# Covers emulator saves (~/Emulation/{saves,storage}) and the Windows-game saves inside
-# Loadout's Proton prefixes (~/.proton-prefixes/<game>/pfx/.../users/steamuser), which are
-# filtered down to the user profile so the Windows install itself is never uploaded.
+# Covers emulator saves (~/Emulation/{saves,storage}) and Windows-game saves from the Proton
+# prefixes Steam keeps at steamapps/compatdata/<appid> -- only for NON-STEAM shortcuts, and
+# filtered to the user profile so the Windows install itself is never uploaded.
 #
 # Emulators keep one save tree per Deck (~/Emulation/{saves,storage}), not one per Steam
 # profile -- so "saves follow the profile" means swapping that tree when the signed-in
@@ -22,19 +22,44 @@ STATE="$HOME/.deck-saves"; mkdir -p "$STATE"
 CURFILE="$STATE/current-account"     # whose saves are sitting in ~/Emulation right now
 FLAGS="--transfers=8 --checkers=8 --fast-list"
 LOG="$HOME/deck-saves.log"
-declare -A SRC=( [saves]="$HOME/Emulation/saves" [storage]="$HOME/Emulation/storage" \
-                 [pcsaves]="$HOME/.proton-prefixes" )
-# A Proton prefix is ~1GB of Windows system files; only the user profile inside it holds game
-# saves, so pcsaves is filtered down to that. rclone takes the FIRST matching rule, so the
-# excludes must precede the include -- and because an --include exists, everything the include
-# does not cover is excluded anyway. Same subtree is used for the "has this Deck got unpushed
-# progress?" check below, otherwise every prefix write (Windows touches them constantly) would
-# read as unsynced progress and jam autosync in permanent CONFLICT.
-declare -A EXTRA=( [pcsaves]="--exclude=**/AppData/Local/Temp/** --exclude=**/AppData/Local/*Cache*/** --exclude=**/AppData/LocalLow/Temp/** --include=*/pfx/drive_c/users/steamuser/**" )
-declare -A FIND=( [pcsaves]="-path */pfx/drive_c/users/steamuser/* -not -path */Temp/* -not -path */Cache/*" )
+declare -A SRC=( [saves]="$HOME/Emulation/saves" [storage]="$HOME/Emulation/storage" )
+declare -A EXTRA=() FIND=()
+
+# --- Windows-game saves -------------------------------------------------------------------
+# Windows games run in a Proton prefix that STEAM owns, at steamapps/compatdata/<appid> -- the
+# normal place, the one every guide points at. Only NON-STEAM shortcuts are our business: a
+# real Steam game's prefix is Steam Cloud's job and is often many GB.
+#
+# Steam sets the high bit on a non-Steam shortcut's appid, so >= 2^31 identifies them exactly.
+# Include rules are built per-appid because rclone filters cannot do that comparison -- and if
+# there are none, the key is left out entirely: an empty include list would mean "no filter",
+# which would upload every Steam game's prefix.
+CD="$HOME/.local/share/Steam/steamapps/compatdata"
+PC_INC=""; PC_FIND=""
+if [ -d "$CD" ]; then
+  for _d in "$CD"/*; do
+    _id=${_d##*/}
+    [[ "$_id" =~ ^[0-9]+$ ]] || continue
+    [ "$_id" -ge 2147483648 ] 2>/dev/null || continue
+    PC_INC="$PC_INC --include=$_id/pfx/drive_c/users/steamuser/**"
+    PC_FIND="$PC_FIND -o -path */$_id/pfx/drive_c/users/steamuser/*"
+  done
+fi
+if [ -n "$PC_INC" ]; then
+  SRC[pcsaves]="$CD"
+  # a prefix is ~1GB of Windows; only the user profile holds saves. rclone is first-match-wins,
+  # so the excludes must come BEFORE the includes.
+  EXTRA[pcsaves]="--exclude=**/AppData/Local/Temp/** --exclude=**/AppData/Local/*Cache*/** --exclude=**/AppData/LocalLow/Temp/**$PC_INC"
+  # the same subtree drives the "has this Deck got unpushed progress?" check -- otherwise the
+  # constant churn Windows makes inside a prefix reads as progress and jams autosync in CONFLICT
+  FIND[pcsaves]="( ${PC_FIND# -o } ) -not -path */Temp/* -not -path */Cache/*"
+fi
 
 # The signed-in account, not merely the first directory under userdata/.
-ACCT="${DECK_SAVES_ACCT:-$(python3 "$HOME/steam-account.py" 2>/dev/null)}"
+# Helpers live INSIDE the AppImage, never in $HOME -- the container deletes any copy there, so
+# reaching into ~ silently broke the account lookup (and with it all save sync) after 0.7.2.
+APPDIR="${LOADOUT_APP:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+ACCT="${DECK_SAVES_ACCT:-$(python3 "$APPDIR/steam-account.py" 2>/dev/null)}"
 [ -n "${ACCT:-}" ] || { echo "ERR cannot determine the signed-in Steam account"; exit 1; }
 
 remote()   { echo "$RCLONE_REMOTE:$SAVES_BASE/$1"; }

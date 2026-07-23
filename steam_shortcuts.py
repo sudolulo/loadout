@@ -248,12 +248,23 @@ def game_entry(appname, tmpl, rom_path, icon="", last_play=0):
                         [tmpl["tag"]] if tmpl.get("tag") else [], last_play)
 
 
-def script_entry(appname, script_path, icon="", tag="PC", last_play=0):
-    """A shortcut that runs a launcher SCRIPT directly -- a PC game, which needs no emulator
-    and so has no learned template. Same shape as game_entry(); `script_path` should be the
-    launcher as seen through the union, so the shortcut survives the game changing disks."""
-    exe = '"%s"' % script_path
-    return _entry_pairs(appname, exe, os.path.dirname(script_path), "", icon,
+def exe_appid(exe_path, appname):
+    """The appid Steam will key a direct-executable shortcut on. Kept in one place because the
+    id is derived from the QUOTED Exe string, so caller and writer must agree exactly -- the
+    id names the game's artwork and its Proton prefix."""
+    return app_id('"%s"' % exe_path, appname)
+
+
+def game_shortcut(appname, exe_path, icon="", tag="PC", last_play=0):
+    """A shortcut that runs a game's OWN executable -- no emulator, no wrapper script.
+
+    This is how a non-Steam game is normally added: Steam launches the binary itself, and (for
+    a Windows game with a compatibility tool set) creates and owns the Proton prefix under
+    steamapps/compatdata/<appid>. `exe_path` should be the game as seen THROUGH THE UNION, so
+    the shortcut survives the game moving between disks. Quoting matches what Steam writes for
+    a hand-added shortcut."""
+    exe = '"%s"' % exe_path
+    return _entry_pairs(appname, exe, '"%s"' % os.path.dirname(exe_path), "", icon,
                         [tag] if tag else [], last_play)
 
 

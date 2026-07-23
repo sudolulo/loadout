@@ -18,7 +18,7 @@ C=$HOME/.config/Ryujinx/bis/system/Contents; mkdir -p "$C"; rm -rf "$C/registere
 echo "  registered: $(ls "$C/registered" 2>/dev/null | wc -l) entries"
 
 echo "== DLC/update register + 30-min timer =="
-python3 "$HOME/register-switch.py"
+python3 "${LOADOUT_APP:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/register-switch.py"
 mkdir -p "$HOME/.config/systemd/user"
 printf '[Unit]\nDescription=Register Switch DLC/updates\nAfter=rclone-roms.service mergerfs-roms.service\n[Service]\nType=oneshot\nExecStart=/usr/bin/python3 %%h/register-switch.py\n' > "$HOME/.config/systemd/user/register-switch.service"
 printf '[Unit]\nDescription=Periodic register\n[Timer]\nOnBootSec=3min\nOnUnitActiveSec=30min\nPersistent=true\n[Install]\nWantedBy=timers.target\n' > "$HOME/.config/systemd/user/register-switch.timer"

@@ -18,6 +18,7 @@ from gi.repository import Gtk, Gdk, GLib, Pango, GdkPixbuf
 import steamgriddb                       # optional SteamGridDB cover art (no-op without a key)
 import steam_shortcuts                    # native Steam shortcuts.vdf management (drop-SRM)
 import steam_recent                       # stamp LastPlayed so new games hit the Recent shelf
+import steam_compat                       # point Windows shortcuts at Proton the way Steam does
 import nas_setup                          # in-app SMB share setup (obscured rclone remote)
 
 HOME = os.path.expanduser("~")
@@ -94,7 +95,6 @@ _DEFAULTS = {
     "pc_union":    "~/Games/PC",                # the PC union you browse; the PC page reads it
     "pc_manifest": "~/Games/PC/.manifest.json",  # ships on the NAS tier -> appears via the union
     "srm_appimage": "~/Emulation/tools/Steam-ROM-Manager.AppImage",
-    "saves_script": "~/deck-saves.sh",
 }
 # Values expanduser'd on load; these two are plain strings (a mode / a path-or-sentinel),
 # so leave them raw and let the resolvers below interpret them.
@@ -362,28 +362,43 @@ def sync_steam(dry_run=False):
                 present.add(rom)
                 if os.path.exists(os.path.join(sd, fn)):     # symlink target resolves
                     addable[rom] = (sysid, _rom_appname(fn))
-    # PC games: the "rom path" is the launcher script itself, seen through the PC union. It
-    # needs no emulator template, so it is added on its own terms rather than via tmpls.
-    if os.path.isdir(PC_SF_DIR):
-        for fn in sorted(os.listdir(PC_SF_DIR)):
-            if fn.startswith(".") or not fn.endswith(".sh"):
-                continue
-            lp = pc_launcher(fn[:-3], union=True)
-            present.add(lp)
-            if os.access(os.path.join(PC_SF_DIR, fn), os.X_OK):
-                addable[lp] = ("pc", fn[:-3])
     add = [(rom, s, n) for rom, (s, n) in addable.items()
-           if rom not in existing and (s == "pc" or s in tmpls)]
+           if rom not in existing and s in tmpls]
     rem = [rom for rom in existing if rom not in present]     # only symlinks that are truly gone
+    # --- PC games -------------------------------------------------------------------------
+    # The shortcut runs the game's OWN executable (through the union); Windows titles get a
+    # Steam compatibility tool instead of a hand-rolled Proton launcher, so Steam owns the
+    # prefix and the saves land in steamapps/compatdata like every other game's.
+    # Ownership is by RECORDED APPID, never by path: a shortcut the user made by hand for a
+    # game in the same folder must never be mistaken for one of ours and removed.
+    try:
+        pcman = json.load(open(PC_MANIFEST))
+    except Exception:
+        pcman = {}
+    picks = set()
+    if os.path.isdir(PC_SF_DIR):
+        picks = {f for f in os.listdir(PC_SF_DIR) if not f.startswith(".")}
+    record = pc_record()
+    by_appid = {steam_shortcuts._ci(e, "appid") & 0xFFFFFFFF: i for i, (_x, e) in enumerate(ents)}
+    pc_add = []                     # (name, exe, kind) -- kind kept for logging/dry-run
+    for name in sorted(picks):
+        exe = pc_exe(name, pcman)
+        if not exe:
+            continue                # nothing runnable known for it
+        aid = steam_shortcuts.exe_appid(exe, name)
+        if aid not in by_appid:
+            pc_add.append((name, exe, (pcman.get(name) or {}).get("kind")))
+    pc_drop = {aid for n, aid in record.items() if n not in picks}
+    pc_dropidx = {by_appid[a] for a in pc_drop if a in by_appid}
     # also drop any stale offline-manager shortcut (Loadout's old name) that's lingering
     _stale = ("offline-manager", "offline manager")
     staleidx = {i for i in range(len(ents))
                 if str(steam_shortcuts._ci(ents[i][1], "AppName")).strip().lower() in _stale}
     if dry_run:
-        return add, rem
-    if not add and not rem and not staleidx:
+        return add + [(e, "pc", n) for n, e, _k in pc_add], rem + sorted(pc_drop)
+    if not add and not rem and not staleidx and not pc_add and not pc_dropidx:
         return 0, 0
-    drop = {existing[rom] for rom in rem} | staleidx
+    drop = {existing[rom] for rom in rem} | staleidx | pc_dropidx
     kept = [ents[i] for i in range(len(ents)) if i not in drop]
     grid = os.path.join(cfg, "grid")
     added_aids = []
@@ -392,15 +407,31 @@ def sync_steam(dry_run=False):
     # desktop client's copy of the same idea, and both are written so either surface picks it up.
     now = int(time.time()) if RECENT_ON else 0
     for rom, sysid, appname in add:
-        if sysid == "pc":
-            aid, pairs = steam_shortcuts.script_entry(appname, rom, last_play=now)
-        else:
-            aid, pairs = steam_shortcuts.game_entry(appname, tmpls[sysid], rom, last_play=now)
+        aid, pairs = steam_shortcuts.game_entry(appname, tmpls[sysid], rom, last_play=now)
         kept.append(("", pairs))
         added_aids.append(aid)
         cov = steamgriddb.cover(appname)
         if cov:
             steam_shortcuts.place_art(grid, aid, portrait=cov)
+    for name, exe, kind in pc_add:
+        aid, pairs = steam_shortcuts.game_shortcut(name, exe, last_play=now)
+        kept.append(("", pairs))
+        added_aids.append(aid)
+        record[name] = aid
+        if exe.lower().endswith(".exe"):
+            # Decided by the executable, NOT the manifest's kind: a "portable" game is very
+            # often a Windows .exe (BattleBlockTheater.exe, Unleashed.exe), and gating on the
+            # label alone would leave those launching a Windows binary with no Proton at all.
+            try:
+                steam_compat.set_tool(aid, steam_compat.newest_proton(HOME), home=HOME)
+            except Exception:
+                pass
+        cov = steamgriddb.cover(name)
+        if cov:
+            steam_shortcuts.place_art(grid, aid, portrait=cov)
+    for n in [n for n in record if n not in picks]:
+        record.pop(n, None)
+    pc_record(record)
     kept = [(str(i), e) for i, (_k, e) in enumerate(kept)]
     for k in range(len(root)):
         if root[k][0].lower() == "shortcuts":
@@ -418,7 +449,7 @@ def sync_steam(dry_run=False):
             steam_recent.stamp_recent(added_aids, home=HOME)
         except Exception:
             pass
-    return len(add), len(rem) + len(staleidx)
+    return len(add) + len(pc_add), len(rem) + len(staleidx) + len(pc_dropidx)
 
 
 QUEUE = os.path.join(HOME, ".loadout-queue.json")
@@ -428,12 +459,44 @@ PC_UNION = _C["pc_union"]
 # branch but Steam is pointed at their path THROUGH THE UNION, so a game moving between
 # disks never invalidates its shortcut. Hidden, so the union you browse stays clean.
 PC_SF_DIR = os.path.join(PC_LOCAL, ".steam-shortcuts", "pc")
-PC_UNION_SF = os.path.join(PC_UNION, ".steam-shortcuts", "pc")
 
 
-def pc_launcher(name, union=False):
-    """Path of a PC game's generated launcher — on disk, or as Steam should see it."""
-    return os.path.join(PC_UNION_SF if union else PC_SF_DIR, name + ".sh")
+PC_RECORD = os.path.join(PC_SF_DIR, ".appids.json")
+
+
+def pc_pick(name):
+    """Marker file recording that this PC game should be in Steam."""
+    return os.path.join(PC_SF_DIR, name)
+
+
+def pc_exe(name, manifest=None):
+    """The game's own executable, addressed THROUGH THE UNION so the shortcut survives the game
+    moving between disks. Empty when the manifest does not say what to run."""
+    if manifest is None:
+        try:
+            manifest = json.load(open(PC_MANIFEST))
+        except Exception:
+            manifest = {}
+    entry = (manifest.get(name) or {}).get("entry")
+    return os.path.join(PC_UNION, name, entry) if entry else ""
+
+
+def pc_record(rec=None):
+    """{game: appid} of the PC shortcuts LOADOUT created. Ownership is tracked explicitly so a
+    shortcut the user made by hand can never be mistaken for ours and removed."""
+    if rec is None:
+        try:
+            return json.load(open(PC_RECORD))
+        except Exception:
+            return {}
+    try:
+        os.makedirs(PC_SF_DIR, exist_ok=True)
+        tmp = PC_RECORD + ".tmp"
+        json.dump(rec, open(tmp, "w"), indent=1)
+        os.replace(tmp, PC_RECORD)
+    except OSError:
+        pass
+    return rec
 SRM = _C["srm_appimage"]
 SAVES_SCRIPT = os.path.join(APP_DIR, "deck-saves.sh")   # bundled in the AppImage, not ~
 SKIP = ("media", "metadata.txt", "systeminfo.txt")
@@ -775,7 +838,7 @@ class Row:
             self.label = name
             # a PC game "shows in Steam" when its generated launcher exists
             if kind == "pc":
-                self.is_steam = os.path.exists(pc_launcher(name))
+                self.is_steam = os.path.exists(pc_pick(name))
 
 
 import re as _re
@@ -1031,39 +1094,42 @@ def copy_with_progress(src, dst, report):
 
 
 def _migrate_launchers():
-    """Move launchers written by an older version into the hidden pick dir.
+    """Retire the generated launcher scripts of older versions.
 
-    They used to sit loose in the PC branch root, where they showed up in the union you
-    browse. Only Loadout's own generated files are touched -- identified by their header,
-    never by extension, so an installer script that happens to live there is left alone."""
-    if not os.path.isdir(PC_LOCAL):
-        return
-    for f in os.listdir(PC_LOCAL):
-        if not f.endswith(".sh"):
+    Up to 0.13.x a picked PC game was represented by a `<name>.sh` Proton wrapper, which set its
+    own STEAM_COMPAT_DATA_PATH under ~/.proton-prefixes -- saves ended up somewhere nothing else
+    knows to look. The pick is a plain marker file now and Steam owns the prefix, so the old
+    scripts are converted to markers (keeping the games you picked) and deleted. Only Loadout's
+    own generated files are touched, identified by their header rather than by extension."""
+    for d in (PC_LOCAL, PC_SF_DIR):
+        if not os.path.isdir(d):
             continue
-        src = os.path.join(PC_LOCAL, f)
-        try:
-            if not os.path.isfile(src) or "generated by Loadout" not in open(src).read(200):
+        for f in os.listdir(d):
+            if not f.endswith(".sh"):
                 continue
-            dst = os.path.join(PC_SF_DIR, f)
-            os.replace(src, dst) if not os.path.exists(dst) else os.remove(src)
-        except Exception:
-            pass
+            src = os.path.join(d, f)
+            try:
+                if not os.path.isfile(src) or "generated by Loadout" not in open(src).read(200):
+                    continue
+                os.makedirs(PC_SF_DIR, exist_ok=True)
+                marker = pc_pick(f[:-3])
+                if not os.path.exists(marker):
+                    open(marker, "w").close()
+                os.remove(src)
+            except Exception:
+                pass
 
 
-def write_launchers(desired=None):
-    """One launcher per PC game that should be on the Deck.
+def write_pc_picks(desired=None):
+    """Record which PC games should show in Steam. Returns (kept, removed).
 
-    Writing or removing a launcher is what adds or removes the Steam shortcut: sync_steam()
-    reconciles shortcuts.vdf against exactly this directory, the same way it does for ROM
-    picks. (It used to be globbed by SRM, which Loadout stopped using in 0.7.2 -- so the
-    launchers were written and nothing ever read them.) Games needing a manual install are
-    skipped: no shortcut is created for something that cannot start.
+    A pick is just a marker file; `sync_steam` turns it into a shortcut pointing at the game's
+    own executable. Games that cannot start -- an installer or wizard repack that has not been
+    installed, or anything with no known entry point -- never become a pick.
 
-    `desired` is the set of games that will be local once the queued copies finish. A
-    PC game cannot run from the read-only NAS branch, so only those get a shortcut --
-    and they get it immediately, so the Steam restart happens when you press Apply
-    rather than unpredictably later when a copy completes.
+    `desired` is the set of games that will be on the Deck once the queued copies finish; they
+    are recorded immediately so Steam is refreshed once, at Apply, rather than unpredictably
+    later when a copy completes.
     """
     try:
         games = json.load(open(PC_MANIFEST))
@@ -1071,47 +1137,30 @@ def write_launchers(desired=None):
         return 0, 0
     os.makedirs(PC_SF_DIR, exist_ok=True)
     _migrate_launchers()
-    wanted, made = set(), 0
+    wanted, kept = set(), 0
     for name, g in games.items():
-        kind = g.get("kind")
-        if kind not in ("linux", "portable", "windows", "installed") or not g.get("entry"):
+        if g.get("kind") not in ("linux", "portable", "windows", "installed") or not g.get("entry"):
             continue                       # installers/wizards get no shortcut
         if desired is not None and name not in desired:
             continue                       # not wanted on this Deck
         if desired is None and not pc_local_path(name):
-            continue                       # only games actually present (either disk)
-        target = os.path.join(PC_UNION, name, g["entry"])
-        out = pc_launcher(name)
-        wanted.add(os.path.basename(out))
-        if kind in ("windows", "installed"):
-            # a Windows game needs Proton, not a bare exec: run it through the Deck's
-            # newest Proton in a per-game prefix.
-            body = ('#!/bin/bash\n# generated by Loadout (Proton)\n'
-                    'export STEAM_COMPAT_CLIENT_INSTALL_PATH="$HOME/.steam/steam"\n'
-                    'export STEAM_COMPAT_DATA_PATH="$HOME/.proton-prefixes/%s"\n'
-                    'mkdir -p "$STEAM_COMPAT_DATA_PATH"\n'
-                    'P=$(ls -d "$HOME"/.steam/steam/steamapps/common/Proton*/proton 2>/dev/null | sort -V | tail -1)\n'
-                    'cd %s || exit 1\nexec "$P" run %s "$@"\n'
-                    % (name, repr(os.path.dirname(target)), repr(target)))
-        else:
-            body = ('#!/bin/bash\n# generated by Loadout\ncd %s || exit 1\nexec %s "$@"\n'
-                    % (repr(os.path.dirname(target)), repr(target)))
+            continue                       # only games actually present
+        wanted.add(name)
         try:
-            if not os.path.exists(out) or open(out).read() != body:
-                open(out, "w").write(body)
-                os.chmod(out, 0o755)
-            made += 1
-        except Exception:
+            if not os.path.exists(pc_pick(name)):
+                open(pc_pick(name), "w").close()
+            kept += 1
+        except OSError:
             pass
-    # drop launchers whose game is gone, so the next sync removes the stale shortcut
     removed = 0
     for f in (os.listdir(PC_SF_DIR) if os.path.isdir(PC_SF_DIR) else []):
-        if f.endswith(".sh") and f not in wanted:
-            try:
-                os.remove(os.path.join(PC_SF_DIR, f)); removed += 1
-            except Exception:
-                pass
-    return made, removed
+        if f.startswith(".") or f in wanted:
+            continue
+        try:
+            os.remove(os.path.join(PC_SF_DIR, f)); removed += 1
+        except OSError:
+            pass
+    return kept, removed
 
 
 def srm_add():
@@ -2105,7 +2154,7 @@ class App(Gtk.Window):
         (this one) is still alive."""
         if self.dirty:
             try:
-                write_launchers()          # flag was already written in finish()
+                write_pc_picks()          # flag was already written in finish()
             except Exception:
                 pass
         Gtk.main_quit()
@@ -2525,7 +2574,7 @@ class App(Gtk.Window):
                          if self.pc_page.store[i][1]}
         steam_changed = bool(sadd or srem)
         try:
-            write_launchers(pc_steam_want)
+            write_pc_picks(pc_steam_want)
             if steam_changed:
                 open(os.path.join(HOME, ".loadout-dirty"), "w").write("apply\n")
         except Exception:
@@ -2598,7 +2647,7 @@ class App(Gtk.Window):
         # Persist immediately: if this process dies before quit_app() runs, the flag is
         # still on disk so the sync is not lost.
         try:
-            write_launchers()
+            write_pc_picks()
             open(os.path.join(HOME, ".loadout-dirty"), "w").write("changes applied\n")
         except Exception:
             pass          # changes saved; Steam gets synced when we exit
