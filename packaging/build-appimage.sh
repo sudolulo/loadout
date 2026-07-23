@@ -15,7 +15,7 @@ mkdir -p "$APPDIR/usr/share/loadout" "$APPDIR/usr/share/icons/hicolor/256x256/ap
 # SRM-fallback chain (loadout-sync.sh, srm-refresh.sh) and the script-copying install.sh are
 # deliberately NOT bundled: the container never falls back to SRM and never installs scripts to ~.
 cp "$ROOT"/loadout.py "$ROOT"/loadout-worker.py "$ROOT"/loadout_update.py \
-   "$ROOT"/steamgriddb.py "$ROOT"/steam_shortcuts.py "$ROOT"/nas_setup.py \
+   "$ROOT"/steamgriddb.py "$ROOT"/steam_shortcuts.py "$ROOT"/steam_recent.py "$ROOT"/nas_setup.py \
    "$ROOT"/steam-refresh.sh "$ROOT"/fix_collections.py \
    "$ROOT"/deck-saves.sh "$ROOT"/deck-saves-daemon.sh "$ROOT"/steam-account.py \
    "$ROOT"/ps3-esde-setup.sh "$ROOT"/mount-setup.sh \

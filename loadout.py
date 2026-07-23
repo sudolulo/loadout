@@ -17,6 +17,7 @@ from gi.repository import Gtk, Gdk, GLib, Pango, GdkPixbuf
 
 import steamgriddb                       # optional SteamGridDB cover art (no-op without a key)
 import steam_shortcuts                    # native Steam shortcuts.vdf management (drop-SRM)
+import steam_recent                       # stamp LastPlayed so new games hit the Recent shelf
 import nas_setup                          # in-app SMB share setup (obscured rclone remote)
 
 HOME = os.path.expanduser("~")
@@ -43,6 +44,8 @@ _DEFAULTS = {
     "rom_union":   "~/Emulation/roms",          # the mergerfs union ES-DE/SRM read
     "default_target": "sd",                     # initial per-game disk when an SD exists
                                                 #   ("sd" or "internal"); overridable per game
+    "recent_on_add": True,                      # stamp newly-added games as just-played so they
+                                                #   appear on the Deck's home "Recent games" shelf
     "pc_local":    "~/Games-local",
     "pc_nas":      "~/.cache/nas-pc",
     "pc_union":    "~/Games",
@@ -52,7 +55,7 @@ _DEFAULTS = {
 }
 # Values expanduser'd on load; these two are plain strings (a mode / a path-or-sentinel),
 # so leave them raw and let the resolvers below interpret them.
-_RAW_KEYS = ("default_target", "rom_sd", "rom_rclone_remote")
+_RAW_KEYS = ("default_target", "rom_sd", "rom_rclone_remote", "recent_on_add")
 CONFIG_PATH = os.path.expanduser(
     os.environ.get("LOADOUT_CONFIG", "~/.config/loadout/config.json"))
 
@@ -137,6 +140,7 @@ ROM_UNION = _C["rom_union"]
 ROM_TARGET = ROM_SD if DEFAULT_DEST == "sd" else ROM_LOCAL   # filesystem the disk gauge tracks
 COVERS_ON = steamgriddb.enabled()                           # show game cover art (needs a key)
 COVER_W, COVER_H = 46, 69                                    # in-list thumbnail size (2:3)
+RECENT_ON = bool(_C["recent_on_add"])                       # surface new games on the Recent shelf
 
 
 def dest_dir(dest):
@@ -261,9 +265,11 @@ def sync_steam(dry_run=False):
     drop = {existing[rom] for rom in rem} | staleidx
     kept = [ents[i] for i in range(len(ents)) if i not in drop]
     grid = os.path.join(cfg, "grid")
+    added_aids = []
     for rom, sysid, appname in add:
         aid, pairs = steam_shortcuts.game_entry(appname, tmpls[sysid], rom)
         kept.append(("", pairs))
+        added_aids.append(aid)
         cov = steamgriddb.cover(appname)
         if cov:
             steam_shortcuts.place_art(grid, aid, portrait=cov)
@@ -277,6 +283,13 @@ def sync_steam(dry_run=False):
     with open(tmp, "wb") as f:
         f.write(steam_shortcuts.dumps(root))
     os.replace(tmp, vdf)
+    # stamp just-added games as recently played so they surface on the Deck's home shelf. Steam is
+    # stopped here (this runs inside the refresh), which is exactly when localconfig.vdf is writable.
+    if RECENT_ON and added_aids:
+        try:
+            steam_recent.stamp_recent(added_aids, home=HOME)
+        except Exception:
+            pass
     return len(add), len(rem) + len(staleidx)
 
 
@@ -373,20 +386,33 @@ class Gamepad(threading.Thread):
         self.last_axis = 0.0
 
     def find(self):
+        """Every gamepad-capable evdev device (a south/A face button plus an analog or hat axis).
+        Deliberately NOT filtered by name: in Game Mode the controller Loadout must read is Steam's
+        *virtual* pad (e.g. 'Microsoft X-Box 360 pad'), which the old name list could miss, and the
+        physical 'Steam Deck' device is exclusively grabbed by Steam and never delivers events."""
         try:
             import evdev
         except Exception:
             return []
+        e = evdev.ecodes
         found = []
         for path in evdev.list_devices():
             try:
                 d = evdev.InputDevice(path)
+                keys = d.capabilities(verbose=False).get(e.EV_KEY, [])   # plain int codes
             except Exception:
                 continue
-            keys = d.capabilities().get(evdev.ecodes.EV_KEY, [])
-            looks_like_pad = evdev.ecodes.BTN_SOUTH in keys or evdev.ecodes.BTN_A in keys
-            if looks_like_pad and any(n in (d.name or "").lower() for n in self.NAMES):
+            # a gamepad is anything exposing the south/A face button. On the Deck only the pad
+            # (Steam's virtual 'Microsoft X-Box 360 pad') has it -- the keyboard and the raw Steam
+            # Controller endpoints don't -- so this is a clean, name-independent test. We do NOT
+            # require an analog axis: Steam's virtual pad can report its axes a beat after it appears.
+            if e.BTN_SOUTH in keys or e.BTN_A in keys:
                 found.append(d)
+            else:
+                try:
+                    d.close()
+                except Exception:
+                    pass
         return found
 
     def run(self):
@@ -396,39 +422,76 @@ class Gamepad(threading.Thread):
             GLib.idle_add(self.app.set_pad_status, "gamepad: evdev unavailable")
             return
         e = evdev.ecodes
-        self.devs = self.find()
-        if not self.devs:
-            GLib.idle_add(self.app.set_pad_status, "gamepad: none detected")
-            return
-        GLib.idle_add(self.app.set_pad_status,
-                      "gamepad: " + ", ".join(d.name for d in self.devs))
-        # xpad maps X to BTN_NORTH(307) and Y to BTN_WEST(308).
-        # Start toggles the highlighted game's copy disk (SD/Internal) -- safe to bind
-        # because it only stages a choice; nothing copies or deletes until Apply (Y) is
-        # confirmed. Apply itself stays on Y so it is never one stray press away.
+        # xpad maps X to BTN_NORTH(307) and Y to BTN_WEST(308). Start toggles the highlighted game's
+        # copy disk (SD/Internal) -- safe to bind because it only stages a choice; nothing copies or
+        # deletes until Apply (Y) is confirmed. Apply itself stays on Y so it's never one stray press.
         BTN = {e.BTN_SOUTH: "a", e.BTN_EAST: "b", e.BTN_NORTH: "x", e.BTN_WEST: "y",
                e.BTN_TL: "l1", e.BTN_TR: "r1", e.BTN_SELECT: "select", e.BTN_START: "start"}
+        # some controllers report the D-pad as buttons rather than the ABS_HAT0 axes; handle both.
+        DPAD = {}
+        for code, act in (("BTN_DPAD_UP", ("move", -1)), ("BTN_DPAD_DOWN", ("move", 1)),
+                          ("BTN_DPAD_LEFT", ("pane", "sidebar")), ("BTN_DPAD_RIGHT", ("pane", "content"))):
+            if hasattr(e, code):
+                DPAD[getattr(e, code)] = act
         sel = selectors.DefaultSelector()
-        for d in self.devs:
-            sel.register(d, selectors.EVENT_READ)
+        fds = {}                       # path -> registered InputDevice
+        last_scan, announced = 0.0, None
         while True:
+            now = time.time()
+            # (Re)scan for controllers rather than enumerating once: in Game Mode Steam creates its
+            # virtual pad AFTER we launch, and controllers hotplug, so keep looking until one arrives.
+            if now - last_scan > 2.0:
+                last_scan = now
+                for d in self.find():
+                    if d.path in fds:
+                        try:
+                            d.close()
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            sel.register(d, selectors.EVENT_READ)
+                            fds[d.path] = d
+                        except Exception:
+                            try:
+                                d.close()
+                            except Exception:
+                                pass
+                status = ("gamepad: " + ", ".join(sorted(x.name for x in fds.values()))
+                          if fds else "gamepad: waiting for controller…")
+                if status != announced:
+                    announced = status
+                    GLib.idle_add(self.app.set_pad_status, status)
             for key, _ in sel.select(timeout=1):
-                for ev in key.fileobj.read():
-                    if ev.type == e.EV_KEY and ev.value == 1 and ev.code in BTN:
-                        GLib.idle_add(self.app.pad_action, BTN[ev.code])
+                d = key.fileobj
+                try:
+                    events = list(d.read())
+                except OSError:            # device went away (unplugged / Steam took it)
+                    try:
+                        sel.unregister(d)
+                    except Exception:
+                        pass
+                    fds.pop(getattr(d, "path", None), None)
+                    continue
+                for ev in events:
+                    if ev.type == e.EV_KEY and ev.value == 1:
+                        if ev.code in BTN:
+                            GLib.idle_add(self.app.pad_action, BTN[ev.code])
+                        elif ev.code in DPAD:
+                            kind, arg = DPAD[ev.code]
+                            GLib.idle_add(self.app.pad_move if kind == "move" else self.app.set_pane, arg)
                     elif ev.type == e.EV_ABS:
                         if ev.code == e.ABS_HAT0Y and ev.value:
                             GLib.idle_add(self.app.pad_move, 1 if ev.value > 0 else -1)
                         elif ev.code == e.ABS_HAT0X and ev.value:
-                            # D-pad left/right moves the *focus* between the sidebar and the
-                            # content list; the L1/R1 bumpers still quick-jump sections.
+                            # D-pad left/right moves focus between the sidebar and the content list;
+                            # the L1/R1 bumpers still quick-jump sections.
                             GLib.idle_add(self.app.set_pane,
                                           "content" if ev.value > 0 else "sidebar")
                         elif ev.code == e.ABS_Y:
-                            # left stick, with a deadzone and a repeat throttle
                             v = ev.value
-                            if abs(v) > 20000 and time.time() - self.last_axis > 0.18:
-                                self.last_axis = time.time()
+                            if abs(v) > 20000 and now - self.last_axis > 0.18:
+                                self.last_axis = now
                                 GLib.idle_add(self.app.pad_move, 1 if v > 0 else -1)
 
 

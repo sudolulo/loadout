@@ -2,6 +2,20 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.8.2] - 2026-07-23
+### Added
+- **Newly-added games show up in "Recent games" on the Deck home screen.** When Loadout adds a
+  game to Steam it now stamps it with a just-played timestamp in `localconfig.vdf` (surgically —
+  backed up, atomic, with a brace-balance guard, never a full rewrite), so it lands on the front
+  page instead of being buried in the library. Set `"recent_on_add": false` to leave play history
+  untouched.
+### Fixed
+- **Controller input works in Game Mode.** The gamepad reader now keeps scanning for the
+  controller — Steam creates its *virtual* pad after the app launches, and pads hotplug — instead
+  of enumerating once at startup; it detects the pad by its gamepad buttons rather than by name,
+  and also understands a D-pad reported as buttons. Previously the pad could come up dead in Game
+  Mode. The detected controller is shown at the bottom of the window (`gamepad: …`).
+
 ## [0.8.1] - 2026-07-23
 ### Fixed
 - **The Steam refresh no longer races SteamOS's auto-relaunch.** On the desktop, killing Steam
