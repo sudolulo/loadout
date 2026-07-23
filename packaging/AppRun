@@ -1,0 +1,24 @@
+#!/bin/bash
+# Loadout AppImage entrypoint. Relies on SteamOS's system python3 + GTK (gi) — verified
+# present on the Deck — so the AppImage stays small and doesn't bundle a fragile runtime.
+HERE="$(dirname "$(readlink -f "$0")")"
+APP="$HERE/usr/share/loadout"
+export PATH="$HOME/bin:$PATH"
+
+case "${1:-}" in
+  --worker)  exec python3 "$APP/loadout-worker.py" ;;            # systemd user service
+  --update)  exec python3 "$APP/loadout_update.py" ;;           # check + self-replace
+  --install) shift; exec bash "$APP/install.sh" "$@" ;;         # full install (scripts+units+migrate)
+  --help|-h) echo "Loadout.AppImage [--worker|--update|--install]"; exit 0 ;;
+esac
+
+# Default launch: keep the ~ helper scripts in sync with THIS AppImage (the systemd units
+# and Apply-time hooks run them from $HOME), ensure a config exists, then run the GUI.
+for f in loadout-worker.py loadout-sync.sh srm-refresh.sh fix_collections.py \
+         deck-saves.sh deck-saves-daemon.sh steam-account.py ps3-esde-setup.sh mount-setup.sh; do
+  [ -f "$APP/$f" ] && install -m 0755 "$APP/$f" "$HOME/$f" 2>/dev/null
+done
+mkdir -p "$HOME/.config/loadout"
+[ -f "$HOME/.config/loadout/config.json" ] || cp "$APP/config.example.json" "$HOME/.config/loadout/config.json" 2>/dev/null
+
+exec python3 "$APP/loadout.py"

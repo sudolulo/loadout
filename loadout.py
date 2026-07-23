@@ -1047,12 +1047,41 @@ class App(Gtk.Window):
 
         self.dirty = False
         self.confirm = None
+        self.update_info = None
         self.busy = False
         self.connect("delete-event", lambda *_: (self.quit_app(), True)[1])
         self.connect("key-press-event", self.on_key)
         self.reload()
         self.pad = Gamepad(self)
         self.pad.start()
+        # Non-blocking self-update check: if a newer AppImage release exists, offer it (U).
+        self.update_info = None
+        threading.Thread(target=self._check_update, daemon=True).start()
+
+    def _check_update(self):
+        try:
+            import loadout_update
+            info = loadout_update.check()
+        except Exception:
+            info = None
+        if info and os.environ.get("APPIMAGE"):
+            GLib.idle_add(self._offer_update, info)
+
+    def _offer_update(self, info):
+        self.update_info = info
+        self.show_banner("Loadout %s is available.     U = install     B = dismiss"
+                         % info["version"], "confirm")
+        return False
+
+    def _do_update(self):
+        info, self.update_info = self.update_info, None
+        self.show_banner("Downloading Loadout %s…" % info["version"], "confirm")
+
+        def work():
+            import loadout_update
+            ok, msg = loadout_update.apply(info)
+            GLib.idle_add(self.show_banner, msg, "confirm" if ok else "error")
+        threading.Thread(target=work, daemon=True).start()
 
     def quit_app(self):
         # Copying happens in a systemd service now, so closing here never cancels it.
@@ -1247,6 +1276,8 @@ class App(Gtk.Window):
             self.toggle_steam_current(); return True
         if k in ("d", "D"):
             self.cycle_dest(); return True
+        if k in ("u", "U") and self.update_info:
+            self._do_update(); return True
         if k in ("F5",):
             self.reload(); return True
         if k in ("Escape", "b", "B"):
@@ -1313,6 +1344,7 @@ class App(Gtk.Window):
     def hide_banner(self):
         self.banner.hide()
         self.confirm = None
+        self.update_info = None
 
     def do_apply(self):
         """Hand the work to the background worker and return at once.
@@ -1457,6 +1489,16 @@ class App(Gtk.Window):
 
 
 if __name__ == "__main__":
+    import sys
+    if "--update" in sys.argv:                     # headless self-update (timer / manual)
+        import loadout_update
+        _info = loadout_update.check()
+        if not _info:
+            print("Loadout %s is up to date." % loadout_update.VERSION)
+            raise SystemExit(0)
+        _ok, _msg = loadout_update.apply(_info)
+        print(_msg)
+        raise SystemExit(0 if _ok else 1)
     w = App()
     w.connect("destroy", Gtk.main_quit)
     w.show_all()

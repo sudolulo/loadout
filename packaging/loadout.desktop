@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Loadout
+Comment=Steam Deck library manager — what's on your Deck vs streamed from the NAS
+Exec=Loadout.AppImage
+Icon=loadout
+Categories=Game;Utility;
+Keywords=steam;deck;rom;emulation;library;nas;
+Terminal=false
