@@ -66,13 +66,15 @@ def _mount_responsive(path, timeout=4):
 # match a standard EmuDeck + rclone-union layout; drop a JSON at the config path (or set
 # $LOADOUT_CONFIG) to point it at a different setup. Nothing else is hardcoded.
 _DEFAULTS = {
-    "rom_local":   "~/Emulation/roms-local",   # writable INTERNAL ROM branch of the union
+    "rom_local":   "~/Emulation/.roms-local",  # writable INTERNAL ROM branch of the union. Hidden:
+                                                #   the union (rom_union) is the only ROM dir you
+                                                #   should ever browse; the tiers are plumbing.
     "rom_sd":      "",                          # SD-card ROM branch: "" = auto-detect the
                                                 #   Deck SD, an explicit path forces it,
                                                 #   "off" disables (internal + NAS only)
-    "rom_nas":     "~/Emulation/nas-roms",      # read-only NAS branch (rclone mount). Lives beside
-                                                #   roms-local and the roms union so every ROM tier
-                                                #   is in one place (not buried in ~/.cache).
+    "rom_nas":     "~/Emulation/.nas-roms",     # read-only NAS branch (rclone mount). Beside the
+                                                #   other tiers and hidden, so ~/Emulation shows
+                                                #   only `roms` (the union) for the ROM library.
     "rom_rclone_remote": "",                    # rclone "remote:path" for the NAS tier, set by
                                                 #   the in-app SMB setup; "" = no NAS (local-only),
                                                 #   "off" also disables. Secrets live in

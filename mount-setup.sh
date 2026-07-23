@@ -21,8 +21,8 @@ eval "$(python3 - <<'PY'
 import json, os, glob
 CFG = os.path.expanduser(os.environ.get("LOADOUT_CONFIG",
                                         "~/.config/loadout/config.json"))
-D = {"rom_local": "~/Emulation/roms-local", "rom_sd": "",
-     "rom_nas": "~/Emulation/nas-roms", "rom_union": "~/Emulation/roms",
+D = {"rom_local": "~/Emulation/.roms-local", "rom_sd": "",
+     "rom_nas": "~/Emulation/.nas-roms", "rom_union": "~/Emulation/roms",
      "rom_rclone_remote": ""}
 c = dict(D)
 try:
@@ -74,6 +74,22 @@ NAS_ON=1
 # tear down any prior mounts
 systemctl --user stop mergerfs-roms.service rclone-roms.service 2>/dev/null
 fusermount -uz "$UNION" 2>/dev/null; [ -n "$NAS" ] && fusermount -uz "$NAS" 2>/dev/null; sleep 1
+
+# one-time: the tier dirs used to be VISIBLE (roms-local / nas-roms); they're hidden now so only
+# the union shows in ~/Emulation. Rename (never copy/merge) so the library moves intact. This MUST
+# run before the roms->LOCAL fallback below, which would otherwise read a missing hidden dir as a
+# first-ever run and move the union on top of it, orphaning the real library.
+migrate_hidden() {                       # $1 = the new, hidden tier path
+  local new="$1" dir base old
+  dir="$(dirname "$new")"; base="$(basename "$new")"
+  case "$base" in .?*) old="$dir/${base#.}" ;; *) return 0 ;; esac
+  [ -d "$old" ] || return 0
+  [ -e "$new" ] && return 0              # target exists: nothing to migrate, never merge
+  mv "$old" "$new" 2>/dev/null || { mkdir -p "$new"; rmdir "$old" 2>/dev/null; }
+  echo "  migrated $old -> $new"
+}
+migrate_hidden "$LOCAL"
+migrate_hidden "$NAS"
 
 # one-time: turn the current roms dir into the INTERNAL branch
 if [ ! -d "$LOCAL" ]; then mv "$UNION" "$LOCAL" 2>/dev/null || mkdir -p "$LOCAL"; fi

@@ -2,6 +2,15 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.9.1] - 2026-07-23
+### Changed
+- **The union is the only ROM folder you see.** The tiers are hidden now —
+  `~/Emulation/.roms-local` (internal) and `~/Emulation/.nas-roms` (NAS) — leaving
+  `~/Emulation/roms`, the union, as the single ROM directory to browse. Existing installs migrate
+  automatically on the next union rebuild: the folders are **renamed, never copied or merged**, so
+  the library moves intact and an existing target is never clobbered. Steam shortcuts are
+  unaffected — they always resolve **through the union**, never a tier.
+
 ## [0.9.0] - 2026-07-23
 ### Added
 - **Storage & NAS settings page.** The Storage section now shows, for every tier (Internal / SD /
