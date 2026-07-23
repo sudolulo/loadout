@@ -80,6 +80,32 @@ lc = open(ud + "/localconfig.vdf").read()
 print("  localconfig LastPlayed entries: %d" % lc.count('"LastPlayed"'))
 if lc.count('"LastPlayed"') < 1: fails.append("no localconfig stamp written")
 
+# a bulk import must not put every game on the shelf at once
+BULK = time.time() - 86400
+for i in range(25):
+    g = "Bulk %02d" % i
+    open(E + "/.roms-local/snes/%s.sfc" % g, "w").write("rom")
+    open(E + "/roms/snes/%s.sfc" % g, "w").write("rom")
+    L.set_steam("snes", "%s.sfc" % g, True)
+    os.utime(os.path.join(L.SF_DIR, "snes", "%s.sfc" % g), (BULK, BULK), follow_symlinks=False)
+L.sync_steam()                                  # adds them (the add path stamps its own)
+# zero them, so what we measure next is purely the BACKFILL of already-present games
+r2 = S.loads(open(ud + "/shortcuts.vdf", "rb").read())
+e2 = S._entries(r2)
+z = [(i, [(k, 0 if k.lower() == "lastplaytime" else v) for k, v in e]) for i, e in e2]
+for k in range(len(r2)):
+    if r2[k][0].lower() == "shortcuts":
+        r2[k] = (r2[k][0], [(str(i), e) for i, (_x, e) in enumerate(z)])
+open(ud + "/shortcuts.vdf", "wb").write(S.dumps(r2))
+L.sync_steam()                                  # steady state: only the backfill can act
+ents2 = S._entries(S.loads(open(ud + "/shortcuts.vdf", "rb").read()))
+bulk_stamped = sum(1 for _i, e in ents2 if S._ci(e, "LastPlayTime"))
+print("  28 unplayed games present -> backfilled: %d (cap is %d)" % (bulk_stamped, L.RECENT_MAX))
+if bulk_stamped > L.RECENT_MAX:
+    fails.append("backfill flooded the shelf: %d stamped, cap %d" % (bulk_stamped, L.RECENT_MAX))
+if bulk_stamped == 0:
+    fails.append("backfill surfaced nothing at all")
+
 shutil.rmtree(root, ignore_errors=True)
 print("FAIL: " + "; ".join(fails) if fails else "PASS")
 sys.exit(1 if fails else 0)

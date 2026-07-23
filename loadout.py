@@ -86,6 +86,10 @@ _DEFAULTS = {
                                                 #   "recent" and is surfaced on the Deck's home
                                                 #   shelf using the time you actually added it;
                                                 #   0 disables the backfill (new adds still stamp)
+    "recent_max": 10,                           # at most this many are backfilled, newest first.
+                                                #   A bulk import shares one timestamp, and
+                                                #   surfacing 200 games at once buries the ones
+                                                #   you actually just added.
     "recent_on_add": True,                      # stamp newly-added games as just-played so they
                                                 #   appear on the Deck's home "Recent games" shelf
     # PC mirrors the Emulation layout exactly: a parent dir holding the UNION you browse plus the
@@ -103,7 +107,7 @@ _DEFAULTS = {
 # Values expanduser'd on load; these two are plain strings (a mode / a path-or-sentinel),
 # so leave them raw and let the resolvers below interpret them.
 _RAW_KEYS = ("default_target", "rom_sd", "pc_sd", "rom_rclone_remote", "pc_rclone_remote",
-             "recent_on_add", "recent_days")
+             "recent_on_add", "recent_days", "recent_max")
 CONFIG_PATH = os.path.expanduser(
     os.environ.get("LOADOUT_CONFIG", "~/.config/loadout/config.json"))
 
@@ -218,6 +222,10 @@ try:
     RECENT_DAYS = float(_C.get("recent_days", 14) or 0)
 except (TypeError, ValueError):
     RECENT_DAYS = 14.0
+try:
+    RECENT_MAX = int(_C.get("recent_max", 10) or 0)
+except (TypeError, ValueError):
+    RECENT_MAX = 10
 # Probe the NAS mount ONCE. A wedged rclone/FUSE mount hangs EVERY access (listdir/stat/walk) in an
 # uninterruptible wait, so if it's unresponsive we treat the NAS as absent for the whole session and
 # never touch it again — Loadout still runs on local games (rebuild the union or relaunch once the
@@ -430,6 +438,11 @@ def sync_steam(dry_run=False):
                     backfill[aid] = int(added)
             except Exception:
                 pass
+        if RECENT_MAX and len(backfill) > RECENT_MAX:
+            # newest first, appid as a stable tie-break: a bulk import shares one mtime, so
+            # without a cap every game in it would land on the shelf at once
+            keep = sorted(backfill.items(), key=lambda kv: (-kv[1], kv[0]))[:RECENT_MAX]
+            backfill = dict(keep)
     if dry_run:
         return add + [(e, "pc", n) for n, e, _k in pc_add], rem + sorted(pc_drop)
     if not add and not rem and not staleidx and not pc_add and not pc_dropidx and not backfill:

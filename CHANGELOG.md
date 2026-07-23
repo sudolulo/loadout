@@ -13,9 +13,13 @@ Notable changes (Keep a Changelog format, SemVer).
   than `recent_days` (default 14) are left alone.
   Verified on a Deck first: a hand-written `LastPlayTime` **survives Steam restarting and being
   rewritten by Steam**, which is what makes the approach viable at all.
+  The backfill is **capped** (`recent_max`, default 10, newest first): a bulk import shares one
+  timestamp, so without a cap all 205 games from one import would land on the shelf together and
+  bury whatever you actually just added.
 ### Added
-- `recent_days` config key — how far back "recently added" reaches; `0` disables the backfill
-  while still stamping new additions.
+- `recent_days` (default 14) and `recent_max` (default 10) config keys — how far back "recently
+  added" reaches and how many are surfaced. `recent_days: 0` disables the backfill while still
+  stamping new additions.
 
 ## [0.14.2] - 2026-07-23
 ### Fixed

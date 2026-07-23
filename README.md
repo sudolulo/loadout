@@ -104,7 +104,8 @@ the same for the PC union: **PC games get the same per-game disk choice as ROMs.
 A game you add is stamped as just-played so it shows up on the Deck's home shelf, which sorts
 non-Steam shortcuts by their own `LastPlayTime`. Games added before this existed are backfilled
 from the time you actually picked them; `recent_days` (default 14) controls how far back that
-reaches, and a real play time is never overwritten.
+reaches and `recent_max` (default 10) how many are surfaced — a bulk import shares one timestamp,
+so without a cap it would bury whatever you just added. A real play time is never overwritten.
 
 ### Cover art (SteamGridDB)
 Drop your SteamGridDB API key in `~/.config/loadout/steamgriddb.key` (or set `$LOADOUT_SGDB_KEY`)
