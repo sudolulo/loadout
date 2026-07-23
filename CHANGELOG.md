@@ -2,6 +2,21 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.15.0] - 2026-07-23
+### Fixed
+- **Games you added really do reach the Deck's home shelf now.** Stamping only ever applied to a
+  shortcut at the moment it was added, so every game added before that shipped — 179 of them on one
+  Deck, all of them — sat at `LastPlayTime = 0` and could never surface. A sync now backfills any
+  Loadout-managed shortcut that has never been played, using **the time you actually added it**
+  (the mtime of the pick `set_steam()`/`write_pc_picks()` created) rather than pretending
+  everything was just played. A real play time is never overwritten, and games added longer ago
+  than `recent_days` (default 14) are left alone.
+  Verified on a Deck first: a hand-written `LastPlayTime` **survives Steam restarting and being
+  rewritten by Steam**, which is what makes the approach viable at all.
+### Added
+- `recent_days` config key — how far back "recently added" reaches; `0` disables the backfill
+  while still stamping new additions.
+
 ## [0.14.2] - 2026-07-23
 ### Fixed
 - **Loadout would not launch: `steam_compat.py` was never added to the AppImage.** 0.14.0 added the

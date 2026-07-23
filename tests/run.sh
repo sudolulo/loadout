@@ -3,7 +3,7 @@
 # prints PASS/FAIL. GUI tests need xvfb; they are skipped (not silently passed) without it.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT/tests" || exit 1
-GUI="test_osk.py test_navosk.py test_pcsd.py test_move_ui.py test_pcsteam2.py"
+GUI="test_osk.py test_navosk.py test_pcsd.py test_move_ui.py test_pcsteam2.py test_recent_backfill.py"
 fail=0
 for t in test_lastplay.py test_move.py test_compat.py; do
   out=$(python3 "$t" 2>&1); r=$?

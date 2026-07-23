@@ -82,6 +82,10 @@ _DEFAULTS = {
     "rom_union":   "~/Emulation/roms",          # the mergerfs union ES-DE/SRM read
     "default_target": "sd",                     # initial per-game disk when an SD exists
                                                 #   ("sd" or "internal"); overridable per game
+    "recent_days": 14,                          # a game added within this many days counts as
+                                                #   "recent" and is surfaced on the Deck's home
+                                                #   shelf using the time you actually added it;
+                                                #   0 disables the backfill (new adds still stamp)
     "recent_on_add": True,                      # stamp newly-added games as just-played so they
                                                 #   appear on the Deck's home "Recent games" shelf
     # PC mirrors the Emulation layout exactly: a parent dir holding the UNION you browse plus the
@@ -99,7 +103,7 @@ _DEFAULTS = {
 # Values expanduser'd on load; these two are plain strings (a mode / a path-or-sentinel),
 # so leave them raw and let the resolvers below interpret them.
 _RAW_KEYS = ("default_target", "rom_sd", "pc_sd", "rom_rclone_remote", "pc_rclone_remote",
-             "recent_on_add")
+             "recent_on_add", "recent_days")
 CONFIG_PATH = os.path.expanduser(
     os.environ.get("LOADOUT_CONFIG", "~/.config/loadout/config.json"))
 
@@ -210,6 +214,10 @@ ROM_TARGET = ROM_SD if DEFAULT_DEST == "sd" else ROM_LOCAL   # filesystem the di
 COVERS_ON = steamgriddb.enabled()                           # show game cover art (needs a key)
 COVER_W, COVER_H = 46, 69                                    # in-list thumbnail size (2:3)
 RECENT_ON = bool(_C["recent_on_add"])                       # surface new games on the Recent shelf
+try:
+    RECENT_DAYS = float(_C.get("recent_days", 14) or 0)
+except (TypeError, ValueError):
+    RECENT_DAYS = 14.0
 # Probe the NAS mount ONCE. A wedged rclone/FUSE mount hangs EVERY access (listdir/stat/walk) in an
 # uninterruptible wait, so if it's unresponsive we treat the NAS as absent for the whole session and
 # never touch it again — Loadout still runs on local games (rebuild the union or relaunch once the
@@ -394,9 +402,37 @@ def sync_steam(dry_run=False):
     _stale = ("offline-manager", "offline manager")
     staleidx = {i for i in range(len(ents))
                 if str(steam_shortcuts._ci(ents[i][1], "AppName")).strip().lower() in _stale}
+    # Games added BEFORE stamping existed sit at LastPlayTime 0, so they never reach the Deck's
+    # home shelf however recently they were added. Backfill from the time the pick was ACTUALLY
+    # made -- the mtime of the symlink/marker set_steam()/write_pc_picks() created -- rather than
+    # pretending everything was just played. Only ever fills in a ZERO, so a real play time (or
+    # one Steam wrote) is never overwritten. Computed here, before the "nothing to do" return,
+    # because in the steady state there is nothing to add and this would otherwise never run.
+    backfill = {}
+    if RECENT_ON and RECENT_DAYS > 0:
+        cutoff = time.time() - RECENT_DAYS * 86400
+        for _idx, e in ents:
+            try:
+                if steam_shortcuts._ci(e, "LastPlayTime"):
+                    continue
+                aid = steam_shortcuts._ci(e, "appid") & 0xFFFFFFFF
+                m = re.search(r'\.steam-shortcuts/([^/]+)/(.+?)"?$',
+                              str(steam_shortcuts._ci(e, "Exe")).strip('"'))
+                if m:
+                    src = os.path.join(SF_DIR, m.group(1), m.group(2))
+                else:
+                    name = next((n for n, v in record.items() if v == aid), None)
+                    src = pc_pick(name) if name else None
+                if not src or not os.path.lexists(src):
+                    continue
+                added = os.lstat(src).st_mtime
+                if added >= cutoff:
+                    backfill[aid] = int(added)
+            except Exception:
+                pass
     if dry_run:
         return add + [(e, "pc", n) for n, e, _k in pc_add], rem + sorted(pc_drop)
-    if not add and not rem and not staleidx and not pc_add and not pc_dropidx:
+    if not add and not rem and not staleidx and not pc_add and not pc_dropidx and not backfill:
         return 0, 0
     drop = {existing[rom] for rom in rem} | staleidx | pc_dropidx
     kept = [ents[i] for i in range(len(ents)) if i not in drop]
@@ -432,6 +468,14 @@ def sync_steam(dry_run=False):
     for n in [n for n in record if n not in picks]:
         record.pop(n, None)
     pc_record(record)
+    for _k, e in kept:                       # apply the backfill to the entries that survive
+        aid = steam_shortcuts._ci(e, "appid") & 0xFFFFFFFF
+        if aid in backfill:
+            for i, (kk, _vv) in enumerate(e):
+                if kk.lower() == "lastplaytime":
+                    e[i] = (kk, backfill[aid])
+                    added_aids.append(aid)
+                    break
     kept = [(str(i), e) for i, (_k, e) in enumerate(kept)]
     for k in range(len(root)):
         if root[k][0].lower() == "shortcuts":

@@ -100,6 +100,12 @@ pulled-offline game defaults to when an SD exists — and you can flip any indiv
 as local and playable — the card's existing folder is used as-is rather than moved. `pc_sd` does
 the same for the PC union: **PC games get the same per-game disk choice as ROMs.**
 
+### Recently added games
+A game you add is stamped as just-played so it shows up on the Deck's home shelf, which sorts
+non-Steam shortcuts by their own `LastPlayTime`. Games added before this existed are backfilled
+from the time you actually picked them; `recent_days` (default 14) controls how far back that
+reaches, and a real play time is never overwritten.
+
 ### Cover art (SteamGridDB)
 Drop your SteamGridDB API key in `~/.config/loadout/steamgriddb.key` (or set `$LOADOUT_SGDB_KEY`)
 and each game shows its cover thumbnail in the list. Covers load lazily per section, in the
