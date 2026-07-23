@@ -21,7 +21,7 @@ rm -f "$HOME"/offline-manager.py "$HOME"/offline-worker.py "$HOME"/offline-sync.
 systemctl --user daemon-reload 2>/dev/null || true
 
 # 1) scripts to ~
-for f in loadout.py loadout-worker.py loadout-sync.sh srm-refresh.sh \
+for f in loadout.py loadout-worker.py loadout_update.py loadout-sync.sh srm-refresh.sh \
          fix_collections.py deck-saves.sh deck-saves-daemon.sh steam-account.py \
          ps3-esde-setup.sh mount-setup.sh; do
   [ -f "$here/$f" ] && install -m 0755 "$here/$f" "$dest/$f"

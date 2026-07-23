@@ -14,7 +14,7 @@ esac
 
 # Default launch: keep the ~ helper scripts in sync with THIS AppImage (the systemd units
 # and Apply-time hooks run them from $HOME), ensure a config exists, then run the GUI.
-for f in loadout-worker.py loadout-sync.sh srm-refresh.sh fix_collections.py \
+for f in loadout-worker.py loadout_update.py loadout-sync.sh srm-refresh.sh fix_collections.py \
          deck-saves.sh deck-saves-daemon.sh steam-account.py ps3-esde-setup.sh mount-setup.sh; do
   [ -f "$APP/$f" ] && install -m 0755 "$APP/$f" "$HOME/$f" 2>/dev/null
 done
