@@ -36,10 +36,11 @@ come from the same `config.json` the GUI reads, so setup and manager always agre
 **NAS itself is set up from inside the app** — see *NAS setup* below.
 
 ## Steam shortcuts — `steam-refresh.sh`, `fix_collections.py`
-Loadout manages your ROM Steam shortcuts **natively — no Steam ROM Manager needed, ever**. It
+Loadout manages your Steam shortcuts **natively — no Steam ROM Manager needed, ever**. For ROMs it
 learns each system's launch template from your existing shortcuts and writes matching ones
 itself (with built-in EmuDeck templates so a fresh device works too), so games launch
-identically. On exit, a flag-watched systemd path unit runs `Loadout.AppImage --refresh`
+identically. PC games get a generated launcher (Proton-wrapped for Windows titles) pointed at
+**through the union**, so moving a game between disks never breaks its shortcut. On exit, a flag-watched systemd path unit runs `Loadout.AppImage --refresh`
 (`steam-refresh.sh` from inside the AppImage) which — with Steam briefly stopped, guarded
 against a live game — reconciles Steam shortcuts with what you've enabled, drops any stale
 `offline-manager` shortcut, fetches cover art, writes per-console collections, clears its flag,
