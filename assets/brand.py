@@ -141,6 +141,24 @@ def make_hero():
     return img.resize((1920, 620), Image.LANCZOS).convert("RGB")
 
 
+def make_landscape():
+    """The WIDE library capsule (Steam grid/<appid>.png) — the horizontal 'title card' shown in
+    the recent-games shelf and non-grid views. Mark on the left, wordmark on the right."""
+    from PIL import ImageFilter
+    w, h = 920 * SS, 430 * SS
+    img = vgrad(w, h, BG_TOP, BG_BOT).convert("RGBA")
+    glow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ImageDraw.Draw(glow).ellipse([w * 0.02, h * 0.14, w * 0.44, h * 0.92], fill=(37, 99, 235, 55))
+    img.alpha_composite(glow.filter(ImageFilter.GaussianBlur(w * 0.05)))
+    g = glyph(int(h * 0.66))
+    img.alpha_composite(g, (int(w * 0.24) - g.width // 2, (h - g.height) // 2))
+    d = ImageDraw.Draw(img)
+    tracked(d, (int(w * 0.60), int(h * 0.33)), "LOADOUT", font(int(78 * SS)), LIGHT, int(10 * SS))
+    tracked(d, (int(w * 0.60), int(h * 0.55)), "STEAM DECK LIBRARY",
+            font(int(24 * SS), bold=False), MUTE, int(6 * SS))
+    return img.resize((920, 430), Image.LANCZOS).convert("RGB")
+
+
 def make_logo():
     w, h = 1000 * SS, 300 * SS
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
@@ -155,6 +173,7 @@ def main():
     for s in (1024, 512, 256, 128, 64):
         make_icon(s).save(os.path.join(OUT, "icon-%d.png" % s))
     make_grid().save(os.path.join(OUT, "grid-600x900.png"))
+    make_landscape().save(os.path.join(OUT, "landscape-920x430.png"))
     make_hero().save(os.path.join(OUT, "hero-1920x620.png"))
     make_logo().save(os.path.join(OUT, "logo.png"))
     print("wrote:", ", ".join(sorted(os.listdir(OUT))))

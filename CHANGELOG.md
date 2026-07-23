@@ -2,6 +2,18 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.8.1] - 2026-07-23
+### Fixed
+- **The Steam refresh no longer races SteamOS's auto-relaunch.** On the desktop, killing Steam
+  makes SteamOS relaunch it immediately — sometimes *before* the refresh had rewritten
+  `shortcuts.vdf` — so the relaunched client held the old shortcuts in memory and clobbered the
+  fresh file on exit (a stale `offline-manager` shortcut reappeared and Loadout's art detached).
+  The refresh now waits longer for a clean shutdown and, after writing, hard-kills any Steam that
+  came back so the next launch loads the fresh file.
+- **Loadout's own Steam card gains its wide (landscape) capsule.** `brand.py` now also generates
+  the horizontal `grid/<appid>.png` capsule, so Loadout shows a proper wide title card in the
+  recent-games shelf, not just the vertical cover.
+
 ## [0.8.0] - 2026-07-23
 ### Added
 - **In-app NAS setup (SMB).** The Storage page has a **Set up NAS share…** button: enter your

@@ -34,14 +34,26 @@ others() {
   done
   GAMEMODE=0; pgrep -x gamescope >/dev/null && GAMEMODE=1
 
-  # stop Steam so shortcuts.vdf is writable and it can't clobber our write on its way out
+  # stop Steam so shortcuts.vdf is writable and it can't clobber our write on its way out. Prefer a
+  # CLEAN shutdown -- a kill makes SteamOS relaunch Steam mid-refresh -- so give it real time first.
   steam -shutdown >/dev/null 2>&1
-  for _ in $(seq 1 30); do pgrep -x steam >/dev/null || break; sleep 2; done
+  for _ in $(seq 1 60); do pgrep -x steam >/dev/null || break; sleep 2; done   # up to ~120s clean
   pkill -x steam 2>/dev/null; pkill -f steamwebhelper 2>/dev/null
   for _ in $(seq 1 10); do pgrep -x steam >/dev/null || break; sleep 2; done
 
   python3 "$APP/loadout.py" --sync-steam         # native: add/remove ROM shortcuts + art
   python3 "$APP/fix_collections.py" --apply 2>&1 | tail -8   # per-console collections (JSON)
+
+  # THE desktop trap: SteamOS auto-relaunches Steam the instant we kill it -- often BEFORE the sync
+  # above rewrote shortcuts.vdf. That instance holds the OLD shortcuts in memory and would clobber
+  # our fresh file when it exits (the stale offline-manager reappears and Loadout's art detaches --
+  # exactly the "still there after a refresh" bug). If Steam came back, SIGKILL it so it gets no
+  # chance to persist stale state; the restart below (or SteamOS's own relaunch) then loads our file.
+  if pgrep -x steam >/dev/null; then
+    echo "steam relaunched mid-refresh -> hard-kill so it reloads the fresh shortcuts"
+    pkill -9 -x steam 2>/dev/null; pkill -9 -f steamwebhelper 2>/dev/null
+    for _ in $(seq 1 10); do pgrep -x steam >/dev/null || break; sleep 1; done
+  fi
 
   # Clear the trigger flag NOW: shortcuts.vdf is already written, and the restart below can kill
   # this process -- clearing it afterward would leave the flag set and re-fire the path unit
