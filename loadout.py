@@ -13,7 +13,9 @@ Built for the Deck: 1280x800, large text, fully drivable from the pad.
 import gi, json, os, shutil, subprocess, threading, time
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk, GLib, Pango
+from gi.repository import Gtk, Gdk, GLib, Pango, GdkPixbuf
+
+import steamgriddb                       # optional SteamGridDB cover art (no-op without a key)
 
 HOME = os.path.expanduser("~")
 
@@ -104,6 +106,8 @@ PC_MANIFEST = _C["pc_manifest"]
 SF_DIR = os.path.join(ROM_LOCAL, ".steam-shortcuts")   # deck-writable Steam pick set
 ROM_UNION = _C["rom_union"]
 ROM_TARGET = ROM_SD if DEFAULT_DEST == "sd" else ROM_LOCAL   # filesystem the disk gauge tracks
+COVERS_ON = steamgriddb.enabled()                           # show game cover art (needs a key)
+COVER_W, COVER_H = 46, 69                                    # in-list thumbnail size (2:3)
 
 
 def dest_dir(dest):
@@ -696,12 +700,20 @@ class Page(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.app = app
         self.steam_col = steam_col
-        # cols: offline(bool) steam(bool) name where size obj
-        self.store = Gtk.ListStore(bool, bool, str, str, str, object)
+        # cols: offline(bool) steam(bool) name where size obj cover(pixbuf)
+        self.store = Gtk.ListStore(bool, bool, str, str, str, object, GdkPixbuf.Pixbuf)
         self.view = Gtk.TreeView(model=self.store)
         self.view.set_activate_on_single_click(True)
         self.view.set_enable_search(False)
         self.view.connect("row-activated", self.on_activate)
+        self._covers_done = False
+
+        if COVERS_ON:                        # leftmost cover-art thumbnail
+            pr = Gtk.CellRendererPixbuf()
+            pr.set_property("xpad", 6)
+            cov = Gtk.TreeViewColumn("", pr, pixbuf=6)
+            cov.set_min_width(COVER_W + 14)
+            self.view.append_column(cov)
 
         t = Gtk.CellRendererToggle()
         t.set_property("xpad", 14)
@@ -761,12 +773,41 @@ class Page(Gtk.Box):
         self.store.clear()
         for r in rows:
             self.store.append([r.is_local, getattr(r, "is_steam", False),
-                               getattr(r, "label", r.name), "", human(r.size), r])
+                               getattr(r, "label", r.name), "", human(r.size), r, None])
         for i in range(len(rows)):
             self.store[i][3] = self._where(i)
         self.empty.set_visible(not rows)
+        self._covers_done = False
         if rows:
             self.view.set_cursor(0)
+
+    def load_covers(self):
+        """Lazily fetch SteamGridDB covers for this page's individual games, once. Runs on a
+        background thread (network) and drops each cover into its row when it arrives."""
+        if not COVERS_ON or self._covers_done or not self.rows:
+            return
+        self._covers_done = True
+        snapshot = list(enumerate(self.rows))
+
+        def work():
+            for i, r in snapshot:
+                if getattr(r, "kind", None) == "roms":
+                    continue                    # cartridge collections have no single cover
+                name = getattr(r, "label", None) or getattr(r, "name", "")
+                path = steamgriddb.cover(name)
+                if not path:
+                    continue
+                try:
+                    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, COVER_W, COVER_H, True)
+                except Exception:
+                    continue
+                GLib.idle_add(self._set_cover, i, r, pb)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _set_cover(self, i, r, pb):
+        if i < len(self.rows) and self.rows[i] is r:     # row still where we left it
+            self.store[i][6] = pb
+        return False
 
     def on_toggled(self, _c, path):
         i = int(str(path))
@@ -1360,6 +1401,8 @@ class App(Gtk.Window):
             if e["key"] == key:
                 self.nav_index = i
                 self.stack.set_visible_child(e["page"])
+                if hasattr(e["page"], "load_covers"):
+                    e["page"].load_covers()        # lazily fetch covers for the shown section
                 self.update_focus_hint()
                 GLib.idle_add(self._grab)
                 break
@@ -1434,6 +1477,9 @@ class App(Gtk.Window):
         self.last_sync_note()
         if hasattr(self, "saves_page"):
             self.saves_page.refresh()
+        cur = self.page()
+        if hasattr(cur, "load_covers"):
+            cur.load_covers()                  # covers for whatever section is showing
         self._grab()
 
     def update_totals(self):

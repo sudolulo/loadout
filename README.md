@@ -74,6 +74,12 @@ pulled-offline game defaults to when an SD exists — and you can flip any indiv
 **Start** (or `d`) in the GUI. Games already on the SD (e.g. an existing EmuDeck library) show
 as local and playable. PC games stay on internal storage.
 
+### Cover art (SteamGridDB)
+Drop your SteamGridDB API key in `~/.config/loadout/steamgriddb.key` (or set `$LOADOUT_SGDB_KEY`)
+and each game shows its cover thumbnail in the list. Covers load lazily per section, in the
+background, and are cached under `~/.cache/loadout/covers/`, so a big library is fetched only
+once. No key → no covers, and the list looks exactly as before.
+
 ### Without a NAS
 The manager degrades gracefully: with no rclone mount it simply shows what's local and the
 "NAS" side is empty — nothing crashes, nothing is lost (the NAS copy is never touched). Likewise

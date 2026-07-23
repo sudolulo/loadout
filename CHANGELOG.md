@@ -2,6 +2,13 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.6.0] - 2026-07-23
+### Added
+- **Game cover art** (SteamGridDB). With an API key set (`~/.config/loadout/steamgriddb.key`,
+  or `$LOADOUT_SGDB_KEY`) each game shows its cover thumbnail in the list. Covers load lazily
+  per section as you browse, on a background thread, and are cached (name→id map + images +
+  "no art" markers) so a library is fetched at most once. No key → no covers, list unchanged.
+
 ## [0.5.0] - 2026-07-23
 ### Added
 - **Left sidebar navigation** replacing the tab strip: a **LIBRARY** group (PC Games,
