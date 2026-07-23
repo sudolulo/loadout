@@ -158,6 +158,70 @@ def learn_templates(root):
     return out
 
 
+# Built-in EmuDeck launch templates, so Loadout works on a FRESH device with no existing
+# shortcuts to learn from. learn_templates() overrides these where the user already has
+# shortcuts (matching their exact emulator/core config). {ROM} is the symlink path.
+_RA_CORES = {                              # systems launched via retroarch.sh -L <core> "{ROM}"
+    "snes": "snes9x", "sfc": "snes9x", "nes": "mesen", "famicom": "mesen",
+    "n64": "mupen64plus_next", "gb": "gambatte", "gbc": "gambatte", "gba": "mgba",
+    "nds": "melonds", "pokemini": "gambatte", "gamegear": "genesis_plus_gx",
+    "mastersystem": "genesis_plus_gx", "genesis": "genesis_plus_gx", "megadrive": "genesis_plus_gx",
+    "segacd": "genesis_plus_gx", "sega32x": "picodrive", "psx": "swanstation", "saturn": "kronos",
+    "dreamcast": "flycast", "tg16": "mednafen_pce", "pcengine": "mednafen_pce", "neogeo": "fbneo",
+    "arcade": "fbneo", "atari2600": "stella", "wonderswan": "mednafen_wswan",
+    "ngp": "mednafen_ngp", "virtualboy": "mednafen_vb",
+}
+_SPECIAL = {                               # systems with a dedicated emulator launcher
+    "gc":     ('"{L}dolphin-emu.sh"', 'vblank_mode=0 %command% -b -e "{ROM}"'),
+    "wii":    ('"{L}dolphin-emu.sh"', 'vblank_mode=0 %command% -b -e "{ROM}"'),
+    "wiiu":   ('"{L}cemu.sh" vblank_mode=0 %command% -f -g "{ROM}"', ""),
+    "switch": ('"{L}ryujinx.sh" --fullscreen "{ROM}"', ""),
+    "psp":    ('"{L}ppsspp.sh" "{ROM}"', ""),
+    "ps2":    ('"{L}pcsx2-qt.sh" "{ROM}"', ""),
+    "ps3":    ('"{L}rpcs3.sh" "{ROM}"', ""),
+    "xbox":   ('"{L}xemu-emu.sh"  -full-screen -dvd_path "{ROM}"', ""),
+    "n3ds":   ('"{L}azahar.sh" "{ROM}"', ""),
+}
+_TAGS = {
+    "gc": "GameCube", "wii": "Wii", "wiiu": "Wii U", "switch": "Nintendo Switch",
+    "snes": "Super Nintendo", "sfc": "Super Nintendo", "nes": "Nintendo Entertainment System",
+    "famicom": "Nintendo Entertainment System", "n64": "Nintendo 64", "nds": "Nintendo DS",
+    "gb": "Game Boy", "gbc": "Game Boy Color", "gba": "Game Boy Advance", "n3ds": "Nintendo 3DS",
+    "gamegear": "Game Gear", "mastersystem": "Master System", "genesis": "Sega Genesis",
+    "megadrive": "Sega Mega Drive", "segacd": "Sega CD", "sega32x": "Sega 32X",
+    "saturn": "Sega Saturn", "dreamcast": "Dreamcast", "psx": "PlayStation", "ps2": "PlayStation 2",
+    "ps3": "PlayStation 3", "psp": "PSP", "xbox": "Xbox", "tg16": "TurboGrafx-16",
+    "pcengine": "PC Engine", "neogeo": "Neo Geo", "arcade": "Arcade", "atari2600": "Atari 2600",
+    "wonderswan": "WonderSwan", "ngp": "Neo Geo Pocket", "virtualboy": "Virtual Boy",
+    "pokemini": "Pokemon Mini",
+}
+
+
+def builtin_templates(home=None):
+    """Loadout's own per-system launch templates (standard EmuDeck layout), so a fresh device
+    with no existing shortcuts still works. Same shape as learn_templates()."""
+    home = home or os.path.expanduser("~")
+    launch = home + "/Emulation/tools/launchers/"
+    corep = home + "/.var/app/org.libretro.RetroArch/config/retroarch/cores/"
+    sd = home + "/Emulation/tools/launchers"
+    out = {}
+    for sysid, core in _RA_CORES.items():
+        out[sysid] = {"exe": '"%sretroarch.sh" -L %s%s_libretro.so "{ROM}"' % (launch, corep, core),
+                      "lo": "", "start_dir": sd, "tag": _TAGS.get(sysid, sysid)}
+    for sysid, (exe, lo) in _SPECIAL.items():
+        out[sysid] = {"exe": exe.replace("{L}", launch), "lo": lo, "start_dir": sd,
+                      "tag": _TAGS.get(sysid, sysid)}
+    return out
+
+
+def templates(root, home=None):
+    """All launch templates: built-in defaults overridden by anything learned from the device's
+    own existing shortcuts (so a custom emulator/core setup is respected)."""
+    t = builtin_templates(home)
+    t.update(learn_templates(root))
+    return t
+
+
 def _entry_pairs(appname, exe, start_dir, lo, icon, tags):
     aid = app_id(exe, appname)
     return aid, [

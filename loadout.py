@@ -194,7 +194,9 @@ def sync_steam(dry_run=False):
     root = steam_shortcuts.loads(raw)
     if steam_shortcuts.dumps(root) != raw:
         raise RuntimeError("shortcuts.vdf round-trip mismatch — refusing to sync")
-    tmpls = steam_shortcuts.learn_templates(root)
+    # built-in EmuDeck templates (so a fresh device works) overridden by the device's own
+    # existing shortcuts (so a custom emulator/core setup is matched exactly)
+    tmpls = steam_shortcuts.templates(root, HOME)
     ents = steam_shortcuts._entries(root)
     rompat = re.compile(r'"([^"]*\.steam-shortcuts/([^/]+)/[^"]*)"')
     existing = {}                          # rom_path -> index in ents

@@ -2,6 +2,12 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.7.1] - 2026-07-23
+### Added
+- **Built-in launch templates** for the standard EmuDeck layout, so Loadout works on a **fresh
+  device with no existing shortcuts** (nothing to learn from). Templates learned from a device's
+  own shortcuts still override the built-ins, so a customized emulator/core setup is matched exactly.
+
 ## [0.7.0] - 2026-07-23
 ### Added
 - **Native Steam ROM shortcuts — Steam ROM Manager is no longer required.** Loadout learns each
