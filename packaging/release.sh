@@ -35,10 +35,16 @@ echo "== launch-test the built AppImage =="
 # mistake that drops a module only shows up here.
 if command -v xvfb-run >/dev/null 2>&1; then
   ( cd "$WORK" && "$OUT" --appimage-extract >/dev/null 2>&1 )
-  if ! LOADOUT_CONFIG="$WORK/launchtest.json" timeout 90 xvfb-run -a python3 - \
-        "$WORK/squashfs-root/usr/share/loadout" <<'PY'
-import os, sys, threading
-sys.path.insert(0, sys.argv[1])
+  # Run from OUTSIDE the repo with the payload as the ONLY import source. Reading this script on
+  # stdin puts the current directory on sys.path, so running it from the checkout let the payload
+  # import modules straight out of the repo: a module added to the repo but forgotten in the
+  # bundle passed the test here and still failed to launch on a real Deck.
+  if ! ( cd "$WORK" && LOADOUT_CONFIG="$WORK/launchtest.json" PYTHONPATH= timeout 90 \
+        xvfb-run -a python3 - "$WORK/squashfs-root/usr/share/loadout" <<'PY'
+import os, sys
+# payload first, and drop the cwd entry so nothing can resolve out of a checkout; the system
+# paths stay (GTK/gi live there)
+sys.path[:] = [sys.argv[1]] + [p for p in sys.path if p not in ("", ".", os.getcwd())]
 import gi; gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib
 import loadout                                  # importing must not explode
@@ -46,7 +52,7 @@ GLib.timeout_add(2500, lambda: (Gtk.main_quit(), False)[1])
 app = loadout.App(); app.show_all(); Gtk.main()  # must actually reach the main loop
 print("   PASS - reached Gtk.main() cleanly")
 PY
-  then
+  ); then
     echo "   ABORT: the built AppImage failed its launch test"; exit 1
   fi
 else

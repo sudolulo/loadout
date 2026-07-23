@@ -2,6 +2,19 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.14.2] - 2026-07-23
+### Fixed
+- **Loadout would not launch: `steam_compat.py` was never added to the AppImage.** 0.14.0 added the
+  module that writes Steam's compatibility-tool mapping but did not add it to the packaging list,
+  so the shipped app died importing it.
+- **The launch test could not have caught it, and now can.** It ran from the checkout and read its
+  script on stdin, which puts the current directory on `sys.path` — so the payload happily imported
+  the missing module out of the repo and the test passed. It now runs from a scratch directory with
+  the payload first and the cwd entry removed. Verified by deliberately deleting a module from a
+  built payload and confirming the test fails.
+- **The build now refuses to produce an AppImage that is missing a module it imports**, rather than
+  leaving it to be discovered on a Deck.
+
 ## [0.14.1] - 2026-07-23
 ### Fixed
 - **Save filters are now `--filter` rules.** rclone logs an error when `--include` and `--exclude`
