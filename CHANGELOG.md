@@ -2,6 +2,19 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.10.0] - 2026-07-23
+### Added
+- **A union for PC games.** PC games now get the same three-tier treatment as ROMs, in the same
+  shape: **`~/Games/PC`** is the union you browse, fed by hidden **`~/Games/.pc-local`** (internal,
+  RW) and **`~/Games/.pc-nas`** (NAS, read-only). `mount-setup` provisions it alongside the ROM
+  union, with its own rclone + mergerfs units. An existing `~/Games-local` library is migrated into
+  the internal tier by renaming (never copied or merged). Point it at the share with
+  `pc_rclone_remote` (e.g. `games:games/PC`); because the PC manifest lives on the share it appears
+  at `~/Games/PC/.manifest.json` through the union, so the PC page works with no extra setup.
+- The Storage page shows **both unions** — ROM library and PC games — each with its union path and
+  mount state, its tiers (folder / mode / free space / count), and its NAS source + connection
+  state. The SMB form gained a **PC path** field, so one host and login configures both tiers.
+
 ## [0.9.1] - 2026-07-23
 ### Changed
 - **The union is the only ROM folder you see.** The tiers are hidden now —

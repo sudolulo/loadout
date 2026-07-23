@@ -23,7 +23,9 @@ CFG = os.path.expanduser(os.environ.get("LOADOUT_CONFIG",
                                         "~/.config/loadout/config.json"))
 D = {"rom_local": "~/Emulation/.roms-local", "rom_sd": "",
      "rom_nas": "~/Emulation/.nas-roms", "rom_union": "~/Emulation/roms",
-     "rom_rclone_remote": ""}
+     "rom_rclone_remote": "",
+     "pc_local": "~/Games/.pc-local", "pc_nas": "~/Games/.pc-nas",
+     "pc_union": "~/Games/PC", "pc_rclone_remote": ""}
 c = dict(D)
 try:
     c.update({k: v for k, v in json.load(open(CFG)).items() if k in D})
@@ -60,6 +62,10 @@ print("SD=%s" % q(sd))
 print("NAS=%s" % q(os.path.expanduser(c["rom_nas"])))
 print("UNION=%s" % q(os.path.expanduser(c["rom_union"])))
 print("REMOTE_CFG=%s" % q(c.get("rom_rclone_remote", "")))
+print("PCLOCAL=%s" % q(os.path.expanduser(c["pc_local"])))
+print("PCNAS=%s" % q(os.path.expanduser(c["pc_nas"])))
+print("PCUNION=%s" % q(os.path.expanduser(c["pc_union"])))
+print("PCREMOTE_CFG=%s" % q(c.get("pc_rclone_remote", "")))
 PY
 )"
 
@@ -155,6 +161,71 @@ systemctl --user daemon-reload
 if [ "$NAS_ON" = 1 ]; then systemctl --user enable --now rclone-roms.service; sleep 6; fi
 systemctl --user enable --now mergerfs-roms.service; sleep 4
 
+# --- PC games union: the SAME shape as ROMs, under ~/Games ----------------------------------
+#     ~/Games/PC  (the union you browse)  <-  ~/Games/.pc-local (RW) + ~/Games/.pc-nas (RO)
+PCREMOTE="${PCREMOTE_CFG:-}"
+systemctl --user stop mergerfs-pc.service rclone-pc.service 2>/dev/null
+fusermount -uz "$PCUNION" 2>/dev/null; [ -n "$PCNAS" ] && fusermount -uz "$PCNAS" 2>/dev/null; sleep 1
+
+# legacy: PC games used to live in ~/Games-local with the union at ~/Games. Move that library into
+# the hidden internal tier (rename, never merge) so the layout matches Emulation.
+if [ -d "$HOME/Games-local" ] && [ ! -e "$PCLOCAL" ]; then
+  mkdir -p "$(dirname "$PCLOCAL")"
+  mv "$HOME/Games-local" "$PCLOCAL" && echo "  migrated $HOME/Games-local -> $PCLOCAL"
+fi
+migrate_hidden "$PCLOCAL"
+migrate_hidden "$PCNAS"
+mkdir -p "$PCLOCAL" "$PCUNION"
+
+PCNAS_ON=0
+{ [ -n "$PCREMOTE" ] && [ "$PCREMOTE" != "off" ] && [ -n "$RCLONE" ]; } && PCNAS_ON=1
+[ "$PCNAS_ON" = 1 ] && mkdir -p "$PCNAS"
+PCBRANCHES="$PCLOCAL=RW"
+[ "$PCNAS_ON" = 1 ] && PCBRANCHES="$PCBRANCHES:$PCNAS=RO"
+
+if [ "$PCNAS_ON" = 1 ]; then
+cat > ~/.config/systemd/user/rclone-pc.service <<UNIT
+[Unit]
+Description=rclone mount NAS PC games (read-only)
+After=network-online.target
+[Service]
+Type=simple
+ExecStart=$RCLONE mount $PCREMOTE "$PCNAS" --read-only --dir-cache-time 1m --vfs-cache-mode minimal --buffer-size 64M --attr-timeout 5s --rc --rc-addr 127.0.0.1:5574 --rc-no-auth
+ExecStop=/usr/bin/fusermount -uz "$PCNAS"
+Restart=on-failure
+RestartSec=10
+[Install]
+WantedBy=default.target
+UNIT
+else
+  systemctl --user disable rclone-pc.service 2>/dev/null
+  rm -f ~/.config/systemd/user/rclone-pc.service
+fi
+
+PCDEPS=""; PCPRE=""
+if [ "$PCNAS_ON" = 1 ]; then
+  PCDEPS=$'After=rclone-pc.service\nRequires=rclone-pc.service'
+  PCPRE="ExecStartPre=/bin/bash -c 'for i in \$(seq 1 30); do mountpoint -q \"$PCNAS\" && exit 0; sleep 1; done; exit 0'"
+fi
+cat > ~/.config/systemd/user/mergerfs-pc.service <<UNIT
+[Unit]
+Description=mergerfs union PC games (internal$([ "$PCNAS_ON" = 1 ] && echo " + NAS"))
+$PCDEPS
+[Service]
+Type=simple
+$PCPRE
+ExecStart=$HOME/bin/mergerfs -f -o category.create=ff,cache.files=partial,dropcacheonclose=true,allow_other=false "$PCBRANCHES" "$PCUNION"
+ExecStop=/usr/bin/fusermount -uz "$PCUNION"
+Restart=on-failure
+RestartSec=10
+[Install]
+WantedBy=default.target
+UNIT
+
+systemctl --user daemon-reload
+if [ "$PCNAS_ON" = 1 ]; then systemctl --user enable --now rclone-pc.service; sleep 6; fi
+systemctl --user enable --now mergerfs-pc.service; sleep 3
+
 # --- report --------------------------------------------------------------------------------
 echo "=== tiers ==="
 echo "  internal  $LOCAL"
@@ -163,7 +234,12 @@ echo "  internal  $LOCAL"
 echo "=== services ==="
 svc="mergerfs-roms.service"; [ "$NAS_ON" = 1 ] && svc="rclone-roms.service $svc"
 systemctl --user is-active $svc
+echo "=== PC tiers ==="
+echo "  internal  $PCLOCAL"
+[ "$PCNAS_ON" = 1 ] && echo "  NAS       $PCREMOTE  ->  $PCNAS" || echo "  NAS       (disabled -- local-only PC union)"
+echo "  union     $PCUNION"
 echo "=== union mounted? ==="; mountpoint -q "$UNION" && echo "UNION mounted" || echo "UNION NOT mounted"
+mountpoint -q "$PCUNION" && echo "PC UNION mounted" || echo "PC UNION NOT mounted"
 echo "=== counts (snes/n64/switch/gc/wii/xbox) ==="
 for s in snes n64 switch gc wii xbox; do printf "  %-7s %s\n" "$s" "$(ls "$UNION/$s" 2>/dev/null | wc -l)"; done
 echo "=== free per tier ==="

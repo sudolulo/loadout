@@ -84,16 +84,20 @@ _DEFAULTS = {
                                                 #   ("sd" or "internal"); overridable per game
     "recent_on_add": True,                      # stamp newly-added games as just-played so they
                                                 #   appear on the Deck's home "Recent games" shelf
-    "pc_local":    "~/Games-local",
-    "pc_nas":      "~/.cache/nas-pc",
-    "pc_union":    "~/Games",
-    "pc_manifest": "~/Games/.manifest.json",
+    # PC mirrors the Emulation layout exactly: a parent dir holding the UNION you browse plus the
+    # hidden tiers that feed it.  ~/Games/PC  <-  ~/Games/.pc-local + ~/Games/.pc-nas
+    "pc_local":    "~/Games/.pc-local",         # writable INTERNAL PC branch (hidden)
+    "pc_nas":      "~/Games/.pc-nas",           # read-only NAS PC branch (rclone mount, hidden)
+    "pc_rclone_remote": "",                     # rclone "remote:path" for the PC NAS tier, e.g.
+                                                #   games:games/PC. "" / "off" = no NAS PC tier.
+    "pc_union":    "~/Games/PC",                # the PC union you browse; the PC page reads it
+    "pc_manifest": "~/Games/PC/.manifest.json",  # ships on the NAS tier -> appears via the union
     "srm_appimage": "~/Emulation/tools/Steam-ROM-Manager.AppImage",
     "saves_script": "~/deck-saves.sh",
 }
 # Values expanduser'd on load; these two are plain strings (a mode / a path-or-sentinel),
 # so leave them raw and let the resolvers below interpret them.
-_RAW_KEYS = ("default_target", "rom_sd", "rom_rclone_remote", "recent_on_add")
+_RAW_KEYS = ("default_target", "rom_sd", "rom_rclone_remote", "pc_rclone_remote", "recent_on_add")
 CONFIG_PATH = os.path.expanduser(
     os.environ.get("LOADOUT_CONFIG", "~/.config/loadout/config.json"))
 
@@ -184,6 +188,7 @@ RECENT_ON = bool(_C["recent_on_add"])                       # surface new games 
 # never touch it again — Loadout still runs on local games (rebuild the union or relaunch once the
 # NAS is back). One probe => at most one leaked probe thread; every NAS access below checks NAS_OK.
 NAS_OK = _mount_responsive(ROM_NAS)
+PC_NAS_OK = _mount_responsive(PC_NAS)      # same one-shot probe for the PC NAS tier
 
 
 def dest_dir(dest):
@@ -1400,6 +1405,16 @@ def union_status():
     return _mount_responsive(ROM_UNION), tiers
 
 
+def pc_union_status():
+    """Same shape as union_status(), for the PC games union (~/Games/PC fed by the hidden tiers)."""
+    tiers = [("Internal", PC_LOCAL, "RW", os.path.isdir(PC_LOCAL), free_on(PC_LOCAL),
+              _system_dirs(PC_LOCAL)[0])]
+    up = PC_NAS_OK
+    tiers.append(("NAS", PC_NAS, "RO", up, free_on(PC_NAS) if up else 0,
+                  _system_dirs(PC_NAS)[0] if up else 0))
+    return _mount_responsive(PC_UNION), tiers
+
+
 class StoragePage(Gtk.Box):
     """The storage tiers behind the ~/Emulation/roms union (Internal + SD + NAS), their mount
     state and free space, plus a rebuild action. A System page, not a game list."""
@@ -1428,11 +1443,12 @@ class StoragePage(Gtk.Box):
         hdr.set_markup("<b>NAS share (SMB)</b>")
         self.pack_start(hdr, False, False, 0)
         grid = Gtk.Grid(column_spacing=10, row_spacing=4)
-        self.e_host = Gtk.Entry(); self.e_share = Gtk.Entry()
+        self.e_host = Gtk.Entry(); self.e_share = Gtk.Entry(); self.e_pcshare = Gtk.Entry()
         self.e_user = Gtk.Entry(); self.e_pass = Gtk.Entry()
         for i, (lbl, ent, ph) in enumerate((
                 ("Host", self.e_host, "192.168.10.14"),
-                ("Share / path", self.e_share, "games/roms"),
+                ("ROM path", self.e_share, "games/roms"),
+                ("PC path", self.e_pcshare, "games/PC  (blank = no PC NAS)"),
                 ("User", self.e_user, "(blank = guest)"),
                 ("Password", self.e_pass, "(unchanged)"))):
             grid.attach(Gtk.Label(label=lbl, xalign=1), 0, i, 1, 1)
@@ -1454,7 +1470,8 @@ class StoragePage(Gtk.Box):
             brow.pack_start(b, False, False, 0)
         self.pack_start(brow, False, False, 0)
         # the pad walks the text fields too, so the share can be typed with the on-screen keyboard
-        self.focusables = [self.e_host, self.e_share, self.e_user, self.e_pass] + self.btns
+        self.focusables = [self.e_host, self.e_share, self.e_pcshare,
+                           self.e_user, self.e_pass] + self.btns
 
         self.prog = Gtk.Label(xalign=0)
         self.prog.get_style_context().add_class("hint")
@@ -1499,45 +1516,56 @@ class StoragePage(Gtk.Box):
 
     # ---- state ----
     def _prefill_smb(self):
-        """Fill the SMB fields from the saved remote (never the password)."""
+        """Fill the SMB fields from the saved remotes (never the password). Both tiers come off the
+        same SMB remote, so there's one host/login and a path per union."""
         cur = _C.get("rom_rclone_remote", "") or ""
         name, path = "games", ""
         if ":" in cur and cur.lower() != "off":
             name, path = cur.split(":", 1)
         self._remote_name = name or "games"
+        pcpath = ""
+        pccur = _C.get("pc_rclone_remote", "") or ""
+        if ":" in pccur and pccur.lower() != "off":
+            pcpath = pccur.split(":", 1)[1]
         pre = nas_setup.read_remote(self._remote_name)
         self.e_host.set_text(pre.get("host", ""))
         self.e_user.set_text(pre.get("user", ""))
         self.e_share.set_text(path)
+        self.e_pcshare.set_text(pcpath)
 
-    def refresh(self):
+    def _union_block(self, title, union_path, mounted, tiers, remote_key, nas_ok, unit):
+        """Markup for one union: the union you browse, then the hidden tiers feeding it."""
         esc = GLib.markup_escape_text
-        mounted, tiers = union_status()
-        self.status.set_markup(
-            "Library union   <b>%s</b>   %s\n"
-            "<span foreground='#9aa0a6' size='small'>what your emulators read — the tiers below, "
-            "merged</span>"
-            % (esc(ROM_UNION),
-               "<span foreground='#7fdc7f'>● mounted</span>" if mounted else
-               "<span foreground='#ff8a8a'>○ not mounted — press Rebuild union</span>"))
-        rows = []
-        for label, path, mode, up, free, nsys in tiers:
+        out = ["<b>%s</b>   <span foreground='#9aa0a6'>%s</span>   %s"
+               % (title, esc(union_path),
+                  "<span foreground='#7fdc7f'>● mounted</span>" if mounted else
+                  "<span foreground='#ff8a8a'>○ not mounted — press Rebuild</span>")]
+        for label, path, mode, up, free, n in tiers:
             dot = "<span foreground='#7fdc7f'>●</span>" if up else \
                   "<span foreground='#6b7280'>○</span>"
-            if up:
-                state = "%s · %s free · %d system%s" % (mode, human(free), nsys,
-                                                        "" if nsys == 1 else "s")
-            else:
-                state = "%s · not mounted" % mode
-            rows.append("%s <b>%s</b>  <span foreground='#9aa0a6'>%s</span>\n"
-                        "<span foreground='#6b7280'>     %s</span>"
-                        % (dot, label, state, esc(path)))
-        remote = _C.get("rom_rclone_remote", "") or "games:roms (default)"
-        rows.append("<span foreground='#6b7280'>     NAS source: %s — %s</span>"
-                    % (esc(remote),
-                       "<span foreground='#7fdc7f'>connected</span>" if NAS_OK else
-                       "<span foreground='#ff8a8a'>unreachable</span>"))
-        self.detail.set_markup("\n".join(rows))
+            state = ("%s · %s free · %d %s%s" % (mode, human(free), n, unit, "" if n == 1 else "s")) \
+                if up else ("%s · not mounted" % mode)
+            out.append("   %s %s  <span foreground='#9aa0a6'>%s</span>\n"
+                       "<span foreground='#6b7280'>        %s</span>" % (dot, label, state, esc(path)))
+        remote = _C.get(remote_key, "") or "(none — local only)"
+        out.append("<span foreground='#6b7280'>        NAS source: %s — %s</span>"
+                   % (esc(remote),
+                      "<span foreground='#7fdc7f'>connected</span>" if nas_ok else
+                      "<span foreground='#ff8a8a'>unreachable</span>"))
+        return "\n".join(out)
+
+    def refresh(self):
+        rom_mounted, rom_tiers = union_status()
+        pc_mounted, pc_tiers = pc_union_status()
+        self.status.set_markup(
+            "Storage\n<span foreground='#9aa0a6' size='small'>each union is the folder you browse; "
+            "the tiers beneath it are hidden and just feed it</span>")
+        self.detail.set_markup(
+            self._union_block("ROM library", ROM_UNION, rom_mounted, rom_tiers,
+                              "rom_rclone_remote", NAS_OK, "system")
+            + "\n\n" +
+            self._union_block("PC games", PC_UNION, pc_mounted, pc_tiers,
+                              "pc_rclone_remote", PC_NAS_OK, "game"))
 
     def rebuild(self):
         if self.busy:
@@ -1576,9 +1604,13 @@ class StoragePage(Gtk.Box):
             self.prog.set_text("rclone error: %s" % ex)
             return None
         remote = nas_setup.remote_path(self._remote_name, share)
+        pcshare = self.e_pcshare.get_text().strip()
+        pcremote = nas_setup.remote_path(self._remote_name, pcshare) if pcshare else ""
         if persist:
             save_config_value("rom_rclone_remote", remote)
             _C["rom_rclone_remote"] = remote
+            save_config_value("pc_rclone_remote", pcremote)     # "" = local-only PC union
+            _C["pc_rclone_remote"] = pcremote
             self.e_pass.set_text("")
         return remote
 

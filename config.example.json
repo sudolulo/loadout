@@ -11,10 +11,12 @@
   "_rom_rclone_remote": "rclone remote:path for the NAS tier, set by the in-app SMB setup (Storage page). \"\" = local-only (no NAS); credentials live obscured in rclone.conf, never here.",
   "rom_rclone_remote": "",
   "rom_union":    "~/Emulation/roms",
-  "pc_local":     "~/Games-local",
-  "pc_nas":       "~/.cache/nas-pc",
-  "pc_union":     "~/Games",
-  "pc_manifest":  "~/Games/.manifest.json",
+  "pc_local":     "~/Games/.pc-local",
+  "pc_nas":       "~/Games/.pc-nas",
+  "_pc_rclone_remote": "rclone remote:path for the NAS PC tier, e.g. games:games/PC. \"\" = local-only PC union.",
+  "pc_rclone_remote": "",
+  "pc_union":     "~/Games/PC",
+  "pc_manifest":  "~/Games/PC/.manifest.json",
   "srm_appimage": "~/Emulation/tools/Steam-ROM-Manager.AppImage",
   "saves_script": "~/deck-saves.sh"
 }
