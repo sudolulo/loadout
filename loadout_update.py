@@ -11,7 +11,7 @@ import os
 import tempfile
 import urllib.request
 
-VERSION = "0.11.3"
+VERSION = "0.12.0"
 REPO = "flan/loadout"
 LATEST = "https://git.onetick.ninja/api/v1/repos/%s/releases/latest" % REPO
 _UA = {"User-Agent": "loadout-updater/%s" % VERSION}

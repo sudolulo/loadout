@@ -2,6 +2,24 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.12.0] - 2026-07-23
+### Fixed
+- **PC games now actually reach Steam.** Ticking "show in Steam" wrote a launcher script and
+  nothing ever read it: the launchers were written for Steam ROM Manager to glob, and Loadout
+  stopped using SRM back in 0.7.2. `sync_steam()` reconciles PC picks itself now, exactly as it
+  does ROM picks, so the whole PC path — manifest → pick → copy → Steam shortcut — works end to
+  end. Windows games keep their Proton launcher; installers still get no shortcut.
+### Added
+- **PC games can live on the SD card.** They were hardcoded to internal storage, so the card's
+  PC tier could be read but never written. PC rows now take the same per-game Internal/SD choice
+  ROMs have (**Start** / `d`), are found on whichever disk holds them, and are freed from every
+  disk holding them.
+### Changed
+- PC launchers moved from the browsable branch root into a hidden `.steam-shortcuts/pc` pick
+  directory beside the ROM one, and Steam is pointed at them **through the union** — so a PC game
+  moving between disks can't invalidate its shortcut. Existing launchers are migrated on the next
+  run (identified by their header, so nothing else in that folder is touched).
+
 ## [0.11.3] - 2026-07-23
 ### Fixed
 - **Scrolling the sidebar onto Storage popped the on-screen keyboard, and dismissing that

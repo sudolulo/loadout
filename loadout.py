@@ -195,6 +195,15 @@ PC_LOCAL = _C["pc_local"]
 PC_SD = _resolve_sd(_C.get("pc_sd", ""), "pc")  # "" when the card has no PC dir
 PC_NAS = _C["pc_nas"]
 PC_MANIFEST = _C["pc_manifest"]
+# PC mirrors the ROM tiers exactly: SD first, so a copy on the card is found before the
+# internal one and a pull can be aimed at either disk.
+PC_LOCALS = [b for b in (PC_SD, PC_LOCAL) if b]
+HAVE_PC_SD = bool(PC_SD)
+DISK_LABEL[PC_LOCAL] = "Internal"
+if PC_SD:
+    DISK_LABEL[PC_SD] = "SD"
+DEFAULT_PC_DEST = "sd" if (PC_SD and str(_C["default_target"]).strip().lower() != "internal") \
+    else "internal"
 SF_DIR = os.path.join(ROM_LOCAL, ".steam-shortcuts")   # deck-writable Steam pick set
 ROM_UNION = _C["rom_union"]
 ROM_TARGET = ROM_SD if DEFAULT_DEST == "sd" else ROM_LOCAL   # filesystem the disk gauge tracks
@@ -223,11 +232,30 @@ def rom_local_path(system, fn=""):
     return None
 
 
+def pc_dest_dir(dest):
+    """The PC branch dir a per-game destination choice ("sd"/"internal") maps to."""
+    return PC_SD if (dest == "sd" and PC_SD) else PC_LOCAL
+
+
+def pc_local_path(name):
+    """The PC branch dir actually holding `name` (SD first), or None if not local."""
+    for b in PC_LOCALS:
+        p = os.path.join(b, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def pull_dest_dir(r):
-    """The branch dir a pull of row `r` copies into: its chosen disk (PC is internal-only)."""
+    """The branch dir a pull of row `r` copies into: the disk chosen for that row."""
     if getattr(r, "kind", None) == "pc":
-        return PC_LOCAL
+        return pc_dest_dir(getattr(r, "dest", DEFAULT_PC_DEST))
     return dest_dir(getattr(r, "dest", DEFAULT_DEST))
+
+
+def row_has_sd(r):
+    """Is there a second disk to choose from for this row's library?"""
+    return HAVE_PC_SD if getattr(r, "kind", None) == "pc" else HAVE_SD
 _STEAM_EXT = (".m3u", ".cue", ".gdi", ".chd", ".iso", ".nkit.iso", ".rvz", ".gcm",
               ".wbfs", ".nsp", ".xci", ".cso", ".pbp", ".gb", ".gbc", ".gba", ".nds",
               ".z64", ".sfc", ".smc", ".nes", ".md", ".sms", ".gg", ".pce")
@@ -276,7 +304,11 @@ def _rom_appname(fn):
 
 
 def sync_steam(dry_run=False):
-    """Reconcile Steam ROM shortcuts with the enabled set (SF_DIR symlinks), natively — no SRM.
+    """Reconcile Steam shortcuts with the enabled set, natively — no SRM.
+
+    Two sources, same mechanism: ROM picks are symlinks under SF_DIR, PC picks are the
+    generated launchers under PC_SF_DIR. Both are addressed THROUGH THEIR UNION, so a game
+    moving between disks never invalidates its shortcut.
 
     Launch commands come from templates learned from the EXISTING shortcuts, so new shortcuts
     launch identically. Dedups by ROM PATH (never by name), so it can neither duplicate nor
@@ -318,7 +350,18 @@ def sync_steam(dry_run=False):
                 present.add(rom)
                 if os.path.exists(os.path.join(sd, fn)):     # symlink target resolves
                     addable[rom] = (sysid, _rom_appname(fn))
-    add = [(rom, s, n) for rom, (s, n) in addable.items() if rom not in existing and s in tmpls]
+    # PC games: the "rom path" is the launcher script itself, seen through the PC union. It
+    # needs no emulator template, so it is added on its own terms rather than via tmpls.
+    if os.path.isdir(PC_SF_DIR):
+        for fn in sorted(os.listdir(PC_SF_DIR)):
+            if fn.startswith(".") or not fn.endswith(".sh"):
+                continue
+            lp = pc_launcher(fn[:-3], union=True)
+            present.add(lp)
+            if os.access(os.path.join(PC_SF_DIR, fn), os.X_OK):
+                addable[lp] = ("pc", fn[:-3])
+    add = [(rom, s, n) for rom, (s, n) in addable.items()
+           if rom not in existing and (s == "pc" or s in tmpls)]
     rem = [rom for rom in existing if rom not in present]     # only symlinks that are truly gone
     # also drop any stale offline-manager shortcut (Loadout's old name) that's lingering
     _stale = ("offline-manager", "offline manager")
@@ -337,7 +380,10 @@ def sync_steam(dry_run=False):
     # desktop client's copy of the same idea, and both are written so either surface picks it up.
     now = int(time.time()) if RECENT_ON else 0
     for rom, sysid, appname in add:
-        aid, pairs = steam_shortcuts.game_entry(appname, tmpls[sysid], rom, last_play=now)
+        if sysid == "pc":
+            aid, pairs = steam_shortcuts.script_entry(appname, rom, last_play=now)
+        else:
+            aid, pairs = steam_shortcuts.game_entry(appname, tmpls[sysid], rom, last_play=now)
         kept.append(("", pairs))
         added_aids.append(aid)
         cov = steamgriddb.cover(appname)
@@ -366,6 +412,16 @@ def sync_steam(dry_run=False):
 QUEUE = os.path.join(HOME, ".loadout-queue.json")
 PROGRESS = os.path.join(HOME, ".loadout-progress.json")
 PC_UNION = _C["pc_union"]
+# PC Steam picks mirror the ROM ones: the launcher scripts are WRITTEN into the internal
+# branch but Steam is pointed at their path THROUGH THE UNION, so a game moving between
+# disks never invalidates its shortcut. Hidden, so the union you browse stays clean.
+PC_SF_DIR = os.path.join(PC_LOCAL, ".steam-shortcuts", "pc")
+PC_UNION_SF = os.path.join(PC_UNION, ".steam-shortcuts", "pc")
+
+
+def pc_launcher(name, union=False):
+    """Path of a PC game's generated launcher — on disk, or as Steam should see it."""
+    return os.path.join(PC_UNION_SF if union else PC_SF_DIR, name + ".sh")
 SRM = _C["srm_appimage"]
 SAVES_SCRIPT = os.path.join(APP_DIR, "deck-saves.sh")   # bundled in the AppImage, not ~
 SKIP = ("media", "metadata.txt", "systeminfo.txt")
@@ -690,12 +746,16 @@ class Row:
             self.label = "%s  —  %s games" % (
                 CART_NAME.get(name, name.replace("-", " ").title()), format(self.n_files, ","))
         else:
-            self.dest = "internal"             # PC games stay on internal storage
-            self.local_path = os.path.join(PC_LOCAL, name)
+            self.dest = DEFAULT_PC_DEST        # PC games pick a disk just like ROMs do
             self.nas_path = os.path.join(PC_NAS, name)
-            self.is_local = os.path.exists(self.local_path)
-            self.local_dirs = [self.local_path] if self.is_local else []
-            self.disk = "Internal" if self.is_local else ""
+            # a PC game can sit on the card or internal; track every branch holding it so a
+            # free clears them all, and label the disk it currently lives on.
+            holding = [b for b in PC_LOCALS if os.path.exists(os.path.join(b, name))]
+            self.local_dirs = [os.path.join(b, name) for b in holding]
+            self.is_local = bool(holding)
+            self.local_path = self.local_dirs[0] if self.local_dirs \
+                else os.path.join(pc_dest_dir(self.dest), name)
+            self.disk = DISK_LABEL.get(holding[0], "") if holding else ""
             src = self.local_path if self.is_local else self.nas_path
             self.size = du(src) if os.path.isdir(src) else (
                 os.path.getsize(src) if os.path.exists(src) else 0)
@@ -703,7 +763,7 @@ class Row:
             self.label = name
             # a PC game "shows in Steam" when its generated launcher exists
             if kind == "pc":
-                self.is_steam = os.path.exists(os.path.join(PC_LOCAL, name + ".sh"))
+                self.is_steam = os.path.exists(pc_launcher(name))
 
 
 import re as _re
@@ -870,7 +930,7 @@ def scan():
     playable = {k for k, v in manifest.items()
                 if isinstance(v, dict) and v.get("kind") in PLAYABLE}
     seen = set()
-    pc_bases = (PC_NAS, PC_LOCAL) if _mount_responsive(PC_NAS) else (PC_LOCAL,)
+    pc_bases = ((PC_NAS, *PC_LOCALS) if _mount_responsive(PC_NAS) else tuple(PC_LOCALS))
     for base in pc_bases:
         if not os.path.isdir(base):
             continue
@@ -958,12 +1018,35 @@ def copy_with_progress(src, dst, report):
     return total
 
 
+def _migrate_launchers():
+    """Move launchers written by an older version into the hidden pick dir.
+
+    They used to sit loose in the PC branch root, where they showed up in the union you
+    browse. Only Loadout's own generated files are touched -- identified by their header,
+    never by extension, so an installer script that happens to live there is left alone."""
+    if not os.path.isdir(PC_LOCAL):
+        return
+    for f in os.listdir(PC_LOCAL):
+        if not f.endswith(".sh"):
+            continue
+        src = os.path.join(PC_LOCAL, f)
+        try:
+            if not os.path.isfile(src) or "generated by Loadout" not in open(src).read(200):
+                continue
+            dst = os.path.join(PC_SF_DIR, f)
+            os.replace(src, dst) if not os.path.exists(dst) else os.remove(src)
+        except Exception:
+            pass
+
+
 def write_launchers(desired=None):
     """One launcher per PC game that should be on the Deck.
 
-    SRM globs this directory, so writing/removing a launcher is what adds or removes the
-    Steam shortcut. Games needing a manual install are skipped -- no shortcut is created
-    for something that cannot start.
+    Writing or removing a launcher is what adds or removes the Steam shortcut: sync_steam()
+    reconciles shortcuts.vdf against exactly this directory, the same way it does for ROM
+    picks. (It used to be globbed by SRM, which Loadout stopped using in 0.7.2 -- so the
+    launchers were written and nothing ever read them.) Games needing a manual install are
+    skipped: no shortcut is created for something that cannot start.
 
     `desired` is the set of games that will be local once the queued copies finish. A
     PC game cannot run from the read-only NAS branch, so only those get a shortcut --
@@ -974,7 +1057,8 @@ def write_launchers(desired=None):
         games = json.load(open(PC_MANIFEST))
     except Exception:
         return 0, 0
-    os.makedirs(PC_LOCAL, exist_ok=True)
+    os.makedirs(PC_SF_DIR, exist_ok=True)
+    _migrate_launchers()
     wanted, made = set(), 0
     for name, g in games.items():
         kind = g.get("kind")
@@ -982,10 +1066,10 @@ def write_launchers(desired=None):
             continue                       # installers/wizards get no shortcut
         if desired is not None and name not in desired:
             continue                       # not wanted on this Deck
-        if desired is None and not os.path.exists(os.path.join(PC_LOCAL, name)):
-            continue                       # only games actually present
+        if desired is None and not pc_local_path(name):
+            continue                       # only games actually present (either disk)
         target = os.path.join(PC_UNION, name, g["entry"])
-        out = os.path.join(PC_LOCAL, name + ".sh")
+        out = pc_launcher(name)
         wanted.add(os.path.basename(out))
         if kind in ("windows", "installed"):
             # a Windows game needs Proton, not a bare exec: run it through the Deck's
@@ -1007,12 +1091,12 @@ def write_launchers(desired=None):
             made += 1
         except Exception:
             pass
-    # drop launchers whose game is gone, so SRM removes the stale shortcut
+    # drop launchers whose game is gone, so the next sync removes the stale shortcut
     removed = 0
-    for f in os.listdir(PC_LOCAL):
+    for f in (os.listdir(PC_SF_DIR) if os.path.isdir(PC_SF_DIR) else []):
         if f.endswith(".sh") and f not in wanted:
             try:
-                os.remove(os.path.join(PC_LOCAL, f)); removed += 1
+                os.remove(os.path.join(PC_SF_DIR, f)); removed += 1
             except Exception:
                 pass
     return made, removed
@@ -1097,14 +1181,13 @@ class Page(Gtk.Box):
         wording."""
         r = self.rows[i]
         checked = self.store[i][0]
-        pc = getattr(r, "kind", None) == "pc"
         if r.is_local:
             if not checked:
                 return "free"                          # will be removed on Apply
-            return (r.disk if HAVE_SD else "on Deck") or "on Deck"
+            return (r.disk if row_has_sd(r) else "on Deck") or "on Deck"
         if not checked:
             return "NAS"
-        if HAVE_SD and not pc:                          # a queued pull with a disk choice
+        if row_has_sd(r):                               # a queued pull with a disk choice
             return "→ " + ("SD" if r.dest == "sd" else "Internal")
         return "→ Deck"
 
@@ -1180,15 +1263,15 @@ class Page(Gtk.Box):
         Only queued pulls of an SD-capable library can be steered -- PC games are
         internal-only, and a game already on the Deck keeps its disk (moving it between
         disks is a separate operation)."""
-        if not HAVE_SD or self.view is None:
+        if self.view is None:
             return
         sel = self.view.get_selection().get_selected()[1]
         if sel is None:
             return
         i = int(str(self.store.get_path(sel)))
         r = self.rows[i]
-        if getattr(r, "kind", None) == "pc" or r.is_local:
-            return
+        if not row_has_sd(r) or r.is_local:
+            return                          # nothing to choose between, or it already landed
         r.dest = "internal" if r.dest == "sd" else "sd"
         self.store[i][3] = self._where(i)
 
@@ -1894,7 +1977,7 @@ class App(Gtk.Window):
         outer.pack_start(bar, False, False, 0)
 
         hint = Gtk.Label(xalign=0)
-        _disk = "    •    Start = disk (SD/Internal)" if HAVE_SD else ""
+        _disk = "    •    Start = disk (SD/Internal)" if (HAVE_SD or HAVE_PC_SD) else ""
         hint.set_text("D-pad = move    •    L1/R1 = switch section    •    A = keep Offline    •    "
                       "X = show in Steam" + _disk + "    •    Y = apply    •    B = back")
         hint.get_style_context().add_class("hint")

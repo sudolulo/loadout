@@ -89,7 +89,7 @@ forces it, `"off"` disables it. `default_target` (`"sd"` / `"internal"`): the di
 pulled-offline game defaults to when an SD exists — and you can flip any individual game with
 **Start** (or `d`) in the GUI. Games already on the SD (e.g. an existing EmuDeck library) show
 as local and playable — the card's existing folder is used as-is rather than moved. `pc_sd` does
-the same for the PC union.
+the same for the PC union: **PC games get the same per-game disk choice as ROMs.**
 
 ### Cover art (SteamGridDB)
 Drop your SteamGridDB API key in `~/.config/loadout/steamgriddb.key` (or set `$LOADOUT_SGDB_KEY`)

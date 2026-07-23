@@ -248,6 +248,15 @@ def game_entry(appname, tmpl, rom_path, icon="", last_play=0):
                         [tmpl["tag"]] if tmpl.get("tag") else [], last_play)
 
 
+def script_entry(appname, script_path, icon="", tag="PC", last_play=0):
+    """A shortcut that runs a launcher SCRIPT directly -- a PC game, which needs no emulator
+    and so has no learned template. Same shape as game_entry(); `script_path` should be the
+    launcher as seen through the union, so the shortcut survives the game changing disks."""
+    exe = '"%s"' % script_path
+    return _entry_pairs(appname, exe, os.path.dirname(script_path), "", icon,
+                        [tag] if tag else [], last_play)
+
+
 def place_art(grid_dir, aid, portrait=None, hero=None, logo=None, landscape=None, icon=None):
     """Drop library art for `aid` into userdata/<id>/config/grid/. Safe (files only)."""
     os.makedirs(grid_dir, exist_ok=True)
