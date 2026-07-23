@@ -2,6 +2,18 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.8.3] - 2026-07-23
+### Fixed
+- **Controls work when Game Mode feeds input as the analog stick.** On the Deck, Steam often sends
+  navigation to a non-Steam app as the *left-stick axes* rather than the D-pad, and Loadout only
+  read the hat (and with too high a stick deadzone). It now reads the sticks too — both axes, with
+  a real deadzone/hysteresis and auto-repeat while held — as well as the D-pad (hat or buttons) and
+  the face buttons. The detected controller is shown at the bottom of the window.
+### Changed
+- **Simpler navigation.** Left/Right switches section (console/list), Up/Down moves the highlight;
+  the L1/R1 bumpers still jump sections and A/X/Y/Start act on the highlighted game. (The earlier
+  two-pane "focus" mode is gone.)
+
 ## [0.8.2] - 2026-07-23
 ### Added
 - **Newly-added games show up in "Recent games" on the Deck home screen.** When Loadout adds a

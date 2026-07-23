@@ -383,7 +383,40 @@ class Gamepad(threading.Thread):
         super().__init__(daemon=True)
         self.app = app
         self.devs = []
-        self.last_axis = 0.0
+        self.axis_dir = {}          # axis code -> current committed direction (-1/0/1)
+        self.axis_at = {}           # axis code -> last time it fired (for auto-repeat)
+
+    def _axis(self, e, code, value, now):
+        """Map a D-pad hat OR an analog stick axis to a nav move. On the Deck, Game Mode can feed
+        navigation as the *left stick* (ABS_X/ABS_Y), not the hat, so both must drive the same moves.
+        Vertical axes scroll the list/sidebar; horizontal axes move focus between the panes. Hats are
+        digital (-1/0/1); sticks ramp and rest off-centre, so use hysteresis (commit past HI, release
+        below LO) plus auto-repeat while held."""
+        VERT = (e.ABS_HAT0Y, e.ABS_Y, e.ABS_RY)
+        HORIZ = (e.ABS_HAT0X, e.ABS_X, e.ABS_RX)
+        if code not in VERT and code not in HORIZ:
+            return
+        digital = code in (e.ABS_HAT0X, e.ABS_HAT0Y)
+        hi, lo = (1, 1) if digital else (12000, 5000)
+        if value >= hi:
+            d = 1
+        elif value <= -hi:
+            d = -1
+        elif abs(value) <= lo:
+            d = 0
+        else:
+            d = self.axis_dir.get(code, 0)          # inside the hysteresis band: hold prior state
+        if d == 0:
+            self.axis_dir[code] = 0
+            return
+        prev = self.axis_dir.get(code, 0)
+        if d != prev or (now - self.axis_at.get(code, 0) > 0.25):   # fresh commit or auto-repeat
+            self.axis_at[code] = now
+            if code in VERT:
+                GLib.idle_add(self.app.pad_move, d)                 # +1 down, -1 up = scroll list
+            else:
+                GLib.idle_add(self.app.next_nav if d > 0 else self.app.prev_nav)  # switch section
+        self.axis_dir[code] = d
 
     def find(self):
         """Every gamepad-capable evdev device (a south/A face button plus an analog or hat axis).
@@ -430,7 +463,7 @@ class Gamepad(threading.Thread):
         # some controllers report the D-pad as buttons rather than the ABS_HAT0 axes; handle both.
         DPAD = {}
         for code, act in (("BTN_DPAD_UP", ("move", -1)), ("BTN_DPAD_DOWN", ("move", 1)),
-                          ("BTN_DPAD_LEFT", ("pane", "sidebar")), ("BTN_DPAD_RIGHT", ("pane", "content"))):
+                          ("BTN_DPAD_LEFT", ("nav", -1)), ("BTN_DPAD_RIGHT", ("nav", 1))):
             if hasattr(e, code):
                 DPAD[getattr(e, code)] = act
         sel = selectors.DefaultSelector()
@@ -479,20 +512,12 @@ class Gamepad(threading.Thread):
                             GLib.idle_add(self.app.pad_action, BTN[ev.code])
                         elif ev.code in DPAD:
                             kind, arg = DPAD[ev.code]
-                            GLib.idle_add(self.app.pad_move if kind == "move" else self.app.set_pane, arg)
+                            if kind == "move":
+                                GLib.idle_add(self.app.pad_move, arg)
+                            else:
+                                GLib.idle_add(self.app.next_nav if arg > 0 else self.app.prev_nav)
                     elif ev.type == e.EV_ABS:
-                        if ev.code == e.ABS_HAT0Y and ev.value:
-                            GLib.idle_add(self.app.pad_move, 1 if ev.value > 0 else -1)
-                        elif ev.code == e.ABS_HAT0X and ev.value:
-                            # D-pad left/right moves focus between the sidebar and the content list;
-                            # the L1/R1 bumpers still quick-jump sections.
-                            GLib.idle_add(self.app.set_pane,
-                                          "content" if ev.value > 0 else "sidebar")
-                        elif ev.code == e.ABS_Y:
-                            v = ev.value
-                            if abs(v) > 20000 and now - self.last_axis > 0.18:
-                                self.last_axis = now
-                                GLib.idle_add(self.app.pad_move, 1 if v > 0 else -1)
+                        self._axis(e, ev.code, ev.value, now)
 
 
 SCAFFOLD = ("media", "gamelist.xml", "metadata.txt", "systeminfo.txt", "desktop.txt")
@@ -1671,13 +1696,9 @@ class App(Gtk.Window):
         return False
 
     def update_focus_hint(self):
-        if self.focus_pane == "sidebar":
-            self.focus_label.set_text(
-                "↑/↓ = choose section    •    A or → = open it    •    L1/R1 = jump sections")
-            return
         pg = self.page()
         disk = "    •    Start = copy to SD / Internal" if HAVE_SD else ""
-        nav = "    •    ← = sections"
+        nav = "    •    ←/→ = section    •    ↑/↓ = move"
         if getattr(pg, "steam_col", False):
             self.focus_label.set_text(
                 "A = keep this game Offline    •    X = show it in Steam" + disk + nav)
@@ -1833,9 +1854,9 @@ class App(Gtk.Window):
                 self.hide_banner()
             return True
         if k in ("Left",):
-            self.set_pane("sidebar"); return True
+            self.prev_nav(); return True
         if k in ("Right",):
-            self.set_pane("content"); return True
+            self.next_nav(); return True
         if k in ("space", "Return", "KP_Enter"):
             self.page().toggle_current(0); return True
         if k in ("y", "Y"):
