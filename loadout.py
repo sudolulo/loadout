@@ -165,7 +165,11 @@ window { background: #1a1d23; }
 treeview { background: #22262e; -GtkTreeView-vertical-separator: 12; }
 treeview:selected { background: #3b82f6; color: #ffffff; }
 button { padding: 12px 22px; border-radius: 8px; font-weight: bold; }
-notebook tab { padding: 10px 26px; font-size: 17pt; }
+list.nav { background: #16191f; padding: 6px; }
+list.nav row { padding: 9px 6px; border-radius: 8px; }
+list.nav row:selected { background: #3b82f6; }
+.navhdr { font-size: 11pt; font-weight: bold; color: #6b7280; padding: 14px 6px 4px 6px; }
+.navitem { font-size: 15pt; }
 .hint { font-size: 13pt; color: #9aa0a6; }
 .big { font-size: 20pt; font-weight: bold; }
 .confirm { font-size: 19pt; font-weight: bold; color: #0b0d10; background: #fbbf24;
@@ -841,6 +845,7 @@ class SavesPage(Gtk.Box):
     whichever Deck you pick up. These buttons are for forcing it, or for settling a
     conflict the daemon refused to guess at."""
     is_saves = True
+    is_panel = True                     # a button panel (navigated like the Storage page)
     steam_col = False
     view = None
 
@@ -976,6 +981,114 @@ class SavesPage(Gtk.Box):
         return False
 
 
+def union_status():
+    """(union_mounted, [(label, path, mode, mounted, free_bytes), ...]) for the storage tiers."""
+    tiers = [("Internal", ROM_LOCAL, "RW", os.path.isdir(ROM_LOCAL), free_on(ROM_LOCAL))]
+    if ROM_SD:
+        tiers.append(("SD", ROM_SD, "RW", os.path.isdir(ROM_SD), free_on(ROM_SD)))
+    nas_up = os.path.ismount(ROM_NAS)
+    tiers.append(("NAS", ROM_NAS, "RO", nas_up, free_on(ROM_NAS) if nas_up else 0))
+    return os.path.ismount(ROM_UNION), tiers
+
+
+class StoragePage(Gtk.Box):
+    """The storage tiers behind the ~/Emulation/roms union (Internal + SD + NAS), their mount
+    state and free space, plus a rebuild action. A System page, not a game list."""
+    is_panel = True                     # a button panel, navigated like the Saves page
+    is_saves = False
+    steam_col = False
+    view = None
+
+    def __init__(self, app):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.app = app
+        self.rows = []
+        self.set_border_width(20)
+        self.status = Gtk.Label(xalign=0)
+        self.status.get_style_context().add_class("big")
+        self.status.set_line_wrap(True)
+        self.pack_start(self.status, False, False, 0)
+        self.detail = Gtk.Label(xalign=0)
+        self.pack_start(self.detail, False, False, 0)
+        self.btns = []
+        b = Gtk.Button(label="Rebuild union      (re-provision the tiers)")
+        b.set_size_request(500, 62)
+        b.connect("clicked", lambda *_: self.rebuild())
+        self.btns.append(b)
+        self.pack_start(b, False, False, 0)
+        self.prog = Gtk.Label(xalign=0)
+        self.prog.get_style_context().add_class("hint")
+        self.pack_start(self.prog, False, False, 0)
+        self.focus = 0
+        self.busy = False
+        self.refresh()
+
+    # ---- App-compat no-ops ----
+    def selected_bytes(self):
+        return 0
+
+    def pending(self):
+        return [], []
+
+    def steam_pending(self):
+        return [], []
+
+    def load(self, *_):
+        pass
+
+    # ---- gamepad (button panel) ----
+    def move_focus(self, delta):
+        self.focus = max(0, min(len(self.btns) - 1, self.focus + delta))
+        self.highlight()
+
+    def highlight(self):
+        if self.btns:
+            self.btns[self.focus].grab_focus()
+
+    def toggle_current(self, *_):
+        self.rebuild()
+
+    # ---- state ----
+    def refresh(self):
+        mounted, tiers = union_status()
+        self.status.set_markup(
+            "Library union   <b>%s</b>\n%s" % (ROM_UNION,
+            "<span foreground='#7fdc7f'>● mounted</span>" if mounted else
+            "<span foreground='#ff8a8a'>○ not mounted — press Rebuild</span>"))
+        rows = []
+        for label, path, mode, up, free in tiers:
+            dot = "<span foreground='#7fdc7f'>●</span>" if up else \
+                  "<span foreground='#6b7280'>○</span>"
+            state = ("%s · %s free" % (mode, human(free))) if up else \
+                    ("%s · not mounted" % mode)
+            rows.append("%s  <b>%s</b>\n<span foreground='#9aa0a6'>      %s   —   %s</span>"
+                        % (dot, label, path, state))
+        self.detail.set_markup("\n".join(rows))
+
+    def rebuild(self):
+        if self.busy:
+            return
+        self.busy = True
+        self.prog.set_text("Rebuilding the union…")
+
+        def work():
+            try:
+                r = subprocess.run(["bash", os.path.join(HOME, "mount-setup.sh")],
+                                   capture_output=True, text=True, timeout=180)
+                msg = "Union rebuilt." if r.returncode == 0 else "Rebuild reported an error."
+            except Exception as e:
+                msg = "Rebuild failed: %s" % e
+            GLib.idle_add(self._done, msg)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _done(self, msg):
+        self.busy = False
+        self.prog.set_text(msg)
+        self.refresh()
+        self.app.reload()
+        return False
+
+
 class App(Gtk.Window):
     def __init__(self):
         super().__init__(title="Loadout")
@@ -998,26 +1111,44 @@ class App(Gtk.Window):
         self.bar.set_size_request(-1, 18)
         outer.pack_start(self.bar, False, False, 0)
 
-        self.nb = Gtk.Notebook()
-        self.nb.set_scrollable(True)
-        self.pc_page = Page(self, "No playable PC games installed yet — installers stay hidden until installed.",
-                            steam_col=True)
-        self.rom_page = Page(self, "No console collections found.")
-        self.nb.append_page(self.pc_page, Gtk.Label(label="  PC Games  "))
-        self.nb.append_page(self.rom_page, Gtk.Label(label="  Collections  "))
-        # one tab per large console that actually has games (built from a first scan);
-        # reuse this scan for the initial load below so startup scans the mounts only once
-        _pc0, _roms0, _by = scan()
+        # --- nav: a grouped left sidebar + a content stack (replaces the tab strip) ---
+        self.stack = Gtk.Stack()
+        self.sidebar = Gtk.ListBox()
+        self.sidebar.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.sidebar.get_style_context().add_class("nav")
+        self.sidebar.connect("row-selected", self._on_nav_row)
+        self.nav = []                          # ordered SELECTABLE entries (headers excluded)
+        self.nav_index = 0
         self.console_pages = {}
+
+        self.pc_page = Page(self, "No playable PC games installed yet.", steam_col=True)
+        self.rom_page = Page(self, "No console collections found.")
+        self.saves_page = SavesPage(self)
+        self.storage_page = StoragePage(self)
+
+        # reuse this one scan for the initial load below (startup scans the mounts once)
+        _pc0, _roms0, _by = scan()
+        self._nav_header("LIBRARY")
+        self._nav_add("pc", self.pc_page, "PC Games")
+        self._nav_add("collections", self.rom_page, "Collections")
         for sysid in TAB_ORDER:
             if sysid in _by:
                 pg = Page(self, "No games.", steam_col=True)
-                self.nb.append_page(pg, Gtk.Label(label="  %s  " % TAB_NAME.get(sysid, sysid)))
                 self.console_pages[sysid] = pg
-        self.saves_page = SavesPage(self)
-        self.nb.append_page(self.saves_page, Gtk.Label(label="  Saves  "))
-        self.pages = [self.pc_page, self.rom_page] + list(self.console_pages.values()) + [self.saves_page]
-        outer.pack_start(self.nb, True, True, 0)
+                self._nav_add(sysid, pg, TAB_NAME.get(sysid, sysid))
+        self._nav_header("SYSTEM")
+        self._nav_add("saves", self.saves_page, "Saves")
+        self._nav_add("storage", self.storage_page, "Storage")
+
+        _side = Gtk.ScrolledWindow()
+        _side.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        _side.set_size_request(232, -1)
+        _side.add(self.sidebar)
+        _split = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        _split.pack_start(_side, False, False, 0)
+        _split.pack_start(self.stack, True, True, 0)
+        outer.pack_start(_split, True, True, 0)
+        self.pages = [e["page"] for e in self.nav]
         self.focus_label = Gtk.Label(xalign=0)
         self.focus_label.get_style_context().add_class("hint")
         outer.pack_start(self.focus_label, False, False, 0)
@@ -1046,7 +1177,7 @@ class App(Gtk.Window):
 
         hint = Gtk.Label(xalign=0)
         _disk = "    •    Start = disk (SD/Internal)" if HAVE_SD else ""
-        hint.set_text("D-pad = move / switch tab    •    A = keep Offline    •    "
+        hint.set_text("D-pad = move    •    L1/R1 = switch section    •    A = keep Offline    •    "
                       "X = show in Steam" + _disk + "    •    Y = apply    •    B = close")
         hint.get_style_context().add_class("hint")
         outer.pack_start(hint, False, False, 0)
@@ -1065,6 +1196,7 @@ class App(Gtk.Window):
         self.busy = False
         self.connect("delete-event", lambda *_: (self.quit_app(), True)[1])
         self.connect("key-press-event", self.on_key)
+        self.select_nav(0)                     # show the first section (PC Games)
         self.reload(prescanned=(_pc0, _roms0, _by))
         self.pad = Gamepad(self)
         self.pad.start()
@@ -1118,16 +1250,16 @@ class App(Gtk.Window):
 
     def _grab(self):
         pg = self.page()
-        if getattr(pg, "is_saves", False):
+        if getattr(pg, "is_panel", False):
             pg.highlight()
         elif getattr(pg, "view", None) is not None:
             pg.view.grab_focus()
         self.update_focus_hint()
 
     def pad_move(self, delta):
-        """D-pad / stick moves the highlighted row"""
+        """D-pad / stick moves the highlighted row (or button on a panel page)"""
         pg = self.page()
-        if getattr(pg, "is_saves", False):
+        if getattr(pg, "is_panel", False):
             pg.move_focus(delta); return False
         if not pg.rows:
             return False
@@ -1157,9 +1289,9 @@ class App(Gtk.Window):
         elif name == "y":
             self.on_apply(None)
         elif name == "l1":
-            self.nb.prev_page(); self._grab()
+            self.prev_nav()
         elif name == "r1":
-            self.nb.next_page(); self._grab()
+            self.next_nav()
         elif name == "select":
             self.reload()
         elif name == "start":
@@ -1194,11 +1326,56 @@ class App(Gtk.Window):
                 "(only Steam changes restart Steam at Apply)")
         elif getattr(pg, "is_saves", False):
             self.focus_label.set_text("A = run the highlighted backup / restore")
+        elif getattr(pg, "is_panel", False):
+            self.focus_label.set_text("A = rebuild the union    •    L1/R1 = switch section")
         else:
             self.focus_label.set_text("A = keep this collection Offline" + disk)
 
+    def _nav_header(self, text):
+        r = Gtk.ListBoxRow()
+        r.set_selectable(False)
+        r.set_activatable(False)
+        lbl = Gtk.Label(label=text, xalign=0)
+        lbl.get_style_context().add_class("navhdr")
+        r.add(lbl)
+        self.sidebar.add(r)
+
+    def _nav_add(self, key, page, label):
+        self.stack.add_named(page, key)
+        r = Gtk.ListBoxRow()
+        lbl = Gtk.Label(label="   " + label, xalign=0)
+        lbl.get_style_context().add_class("navitem")
+        r.add(lbl)
+        r._navkey = key
+        self.sidebar.add(r)
+        self.nav.append({"key": key, "page": page, "label": label, "row": r})
+
+    def _on_nav_row(self, _list, row):
+        if row is None:
+            return
+        key = getattr(row, "_navkey", None)
+        if key is None:
+            return
+        for i, e in enumerate(self.nav):
+            if e["key"] == key:
+                self.nav_index = i
+                self.stack.set_visible_child(e["page"])
+                self.update_focus_hint()
+                GLib.idle_add(self._grab)
+                break
+
+    def select_nav(self, i):
+        i = max(0, min(i, len(self.nav) - 1))
+        self.sidebar.select_row(self.nav[i]["row"])    # fires _on_nav_row
+
+    def prev_nav(self):
+        self.select_nav(self.nav_index - 1)
+
+    def next_nav(self):
+        self.select_nav(self.nav_index + 1)
+
     def page(self):
-        return self.nb.get_nth_page(self.nb.get_current_page())
+        return self.nav[self.nav_index]["page"]
 
     def poll_progress(self):
         """Show the background worker's state; keep polling while it is running."""
@@ -1279,9 +1456,9 @@ class App(Gtk.Window):
                 self.hide_banner()
             return True
         if k in ("Left",):
-            self.nb.prev_page(); self._grab(); return True
+            self.prev_nav(); return True
         if k in ("Right",):
-            self.nb.next_page(); self._grab(); return True
+            self.next_nav(); return True
         if k in ("space", "Return", "KP_Enter"):
             self.page().toggle_current(0); return True
         if k in ("y", "Y"):
@@ -1302,9 +1479,9 @@ class App(Gtk.Window):
             return True
         # L1/R1 commonly arrive as these
         if k in ("Page_Up", "bracketleft", "l", "L"):
-            self.nb.prev_page(); self._grab(); return True
+            self.prev_nav(); return True
         if k in ("Page_Down", "bracketright", "r", "R", "Tab"):
-            self.nb.next_page(); self._grab(); return True
+            self.next_nav(); return True
         return False
 
     def on_apply(self, _b):

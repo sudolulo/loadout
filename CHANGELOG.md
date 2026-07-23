@@ -2,6 +2,17 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.5.0] - 2026-07-23
+### Added
+- **Left sidebar navigation** replacing the tab strip: a **LIBRARY** group (PC Games,
+  Collections, one section per console with games) and a separated **SYSTEM** group (Saves,
+  and a new **Storage** page). L1/R1 or the D-pad move between sections.
+- **Storage page**: shows the union mount state and each tier (Internal / SD / NAS) with its
+  path, RW/RO mode, mount state and free space, plus a **Rebuild union** action.
+### Changed
+- The many per-console tabs are condensed into the sidebar's LIBRARY list; Saves is no longer
+  a game tab but a SYSTEM entry alongside Storage.
+
 ## [0.4.1] - 2026-07-23
 ### Changed
 - Faster startup. The library is scanned once at launch instead of twice, and the Saves

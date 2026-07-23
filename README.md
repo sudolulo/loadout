@@ -5,8 +5,10 @@ which games are kept **offline** on the Deck, which **show in Steam**, save sync
 and (for PC) automated installs.
 
 ## The GUI — `loadout.py`
-1280×800, fully drivable from the pad. Per-console tabs plus **PC Games**, **Collections**
-(whole-console ROM sets) and **Saves**. Two per-game toggles:
+1280×800, fully drivable from the pad. A left **sidebar** groups navigation into **LIBRARY**
+(PC Games, Collections, and a section per console) and **SYSTEM** (Saves, and **Storage** —
+the union tiers + a rebuild action). L1/R1 (or the D-pad) move between sections. Two per-game
+toggles:
 
 - **A — Offline**: copy the game local (playable offline, writable) or free the local copy
   (the NAS copy is never touched).
@@ -19,7 +21,7 @@ and (for PC) automated installs.
   actually is.
 
 Only **playable** games are listed — installers (un-installed PC repacks) are hidden.
-Rescan = **⧉ View**, Apply = **Y**, Close = **B**, tabs = **L1/R1** or D-pad, disk = **Start**
+Rescan = **⧉ View**, Apply = **Y**, Close = **B**, section = **L1/R1** or D-pad, disk = **Start**
 (keyboard: `d`).
 
 ## Overlays — `mount-setup.sh`
