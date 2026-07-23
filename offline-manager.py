@@ -1,0 +1,1226 @@
+#!/usr/bin/env python3
+"""Offline Manager -- choose what stays on this Deck.
+
+The library is a mergerfs union: local storage first, then a READ-ONLY rclone mount of
+the NAS. Anything not held locally is streamed, which needs the network and cannot be
+written to -- PC games in particular will not run from the NAS branch.
+
+Ticking a row copies it local (playable offline, writable). Unticking removes only the
+LOCAL copy; the NAS copy is never touched, so nothing is ever lost.
+
+Built for the Deck: 1280x800, large text, fully drivable from the pad.
+"""
+import gi, json, os, shutil, subprocess, threading, time
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib, Pango
+
+HOME = os.path.expanduser("~")
+ROM_LOCAL = os.path.join(HOME, "Emulation/roms-local")
+ROM_NAS = os.path.join(HOME, ".cache/nas-roms")
+PC_LOCAL = os.path.join(HOME, "Games-local")
+PC_NAS = os.path.join(HOME, ".cache/nas-pc")
+PC_MANIFEST = os.path.join(HOME, "Games/.manifest.json")
+SF_DIR = os.path.join(ROM_LOCAL, ".steam-shortcuts")   # deck-writable Steam pick set
+ROM_UNION = os.path.join(HOME, "Emulation", "roms")
+_STEAM_EXT = (".m3u", ".cue", ".gdi", ".chd", ".iso", ".nkit.iso", ".rvz", ".gcm",
+              ".wbfs", ".nsp", ".xci", ".cso", ".pbp", ".gb", ".gbc", ".gba", ".nds",
+              ".z64", ".sfc", ".smc", ".nes", ".md", ".sms", ".gg", ".pce")
+
+
+def steam_file(files):
+    """The ONE file SRM should make a shortcut from: a playlist/cue if present (so a
+    multi-disc game is one shortcut, not one per disc), else the single playable file."""
+    low = {x: x.lower() for x in files}
+    for ext in (".m3u", ".cue"):
+        for x in files:
+            if low[x].endswith(ext):
+                return x
+    play = [x for x in files if any(low[x].endswith(e) for e in _STEAM_EXT)]
+    return sorted(play or files)[0]
+
+
+def set_steam(system, sfile, on):
+    """Add/remove a Steam pick by symlinking (or unlinking) its launch file."""
+    d = os.path.join(SF_DIR, system)
+    link = os.path.join(d, sfile)
+    if on:
+        os.makedirs(d, exist_ok=True)
+        if not os.path.lexists(link):
+            os.symlink(os.path.join(ROM_UNION, system, sfile), link)
+    elif os.path.lexists(link):
+        os.remove(link)
+QUEUE = os.path.join(HOME, ".offline-manager-queue.json")
+PROGRESS = os.path.join(HOME, ".offline-manager-progress.json")
+PC_UNION = os.path.join(HOME, "Games")
+SRM = os.path.join(HOME, "Emulation/tools/Steam-ROM-Manager.AppImage")
+SKIP = ("media", "metadata.txt", "systeminfo.txt")
+
+CSS = b"""
+window { background: #1a1d23; }
+* { font-size: 16pt; color: #e8eaed; }
+treeview { background: #22262e; -GtkTreeView-vertical-separator: 12; }
+treeview:selected { background: #3b82f6; color: #ffffff; }
+button { padding: 12px 22px; border-radius: 8px; font-weight: bold; }
+notebook tab { padding: 10px 26px; font-size: 17pt; }
+.hint { font-size: 13pt; color: #9aa0a6; }
+.big { font-size: 20pt; font-weight: bold; }
+.confirm { font-size: 19pt; font-weight: bold; color: #0b0d10; background: #fbbf24;
+           padding: 16px; border-radius: 10px; }
+.error   { font-size: 18pt; font-weight: bold; color: #ffffff; background: #b91c1c;
+           padding: 14px; border-radius: 10px; }
+"""
+
+
+def du(path):
+    t = 0
+    for r, _, fs in os.walk(path):
+        for f in fs:
+            try:
+                t += os.path.getsize(os.path.join(r, f))
+            except OSError:
+                pass
+    return t
+
+
+def human(n):
+    for u in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return "%d %s" % (n, u) if u in ("B", "KB") else "%.1f %s" % (n, u)
+        n /= 1024.0
+    return "%.1f PB" % n
+
+
+def free_bytes():
+    st = os.statvfs(HOME)
+    return st.f_bavail * st.f_frsize
+
+
+def total_bytes():
+    st = os.statvfs(HOME)
+    return st.f_blocks * st.f_frsize
+
+
+class Gamepad(threading.Thread):
+    """Read the controller straight from evdev.
+
+    Steam Input sends XInput events to non-Steam apps, not keystrokes, so a GTK window
+    receives nothing from the pad. Reading the device ourselves works no matter which
+    Steam Input layout happens to be applied.
+    """
+    NAMES = ("x-box", "xbox", "steam controller", "steam deck", "gamepad", "controller")
+
+    def __init__(self, app):
+        super().__init__(daemon=True)
+        self.app = app
+        self.devs = []
+        self.last_axis = 0.0
+
+    def find(self):
+        try:
+            import evdev
+        except Exception:
+            return []
+        found = []
+        for path in evdev.list_devices():
+            try:
+                d = evdev.InputDevice(path)
+            except Exception:
+                continue
+            keys = d.capabilities().get(evdev.ecodes.EV_KEY, [])
+            looks_like_pad = evdev.ecodes.BTN_SOUTH in keys or evdev.ecodes.BTN_A in keys
+            if looks_like_pad and any(n in (d.name or "").lower() for n in self.NAMES):
+                found.append(d)
+        return found
+
+    def run(self):
+        try:
+            import evdev, selectors
+        except Exception:
+            GLib.idle_add(self.app.set_pad_status, "gamepad: evdev unavailable")
+            return
+        e = evdev.ecodes
+        self.devs = self.find()
+        if not self.devs:
+            GLib.idle_add(self.app.set_pad_status, "gamepad: none detected")
+            return
+        GLib.idle_add(self.app.set_pad_status,
+                      "gamepad: " + ", ".join(d.name for d in self.devs))
+        # xpad maps X to BTN_NORTH(307) and Y to BTN_WEST(308).
+        # Start is deliberately NOT bound: Apply copies and deletes, so it should never
+        # be one stray button press away.
+        BTN = {e.BTN_SOUTH: "a", e.BTN_EAST: "b", e.BTN_NORTH: "x", e.BTN_WEST: "y",
+               e.BTN_TL: "l1", e.BTN_TR: "r1", e.BTN_SELECT: "select"}
+        sel = selectors.DefaultSelector()
+        for d in self.devs:
+            sel.register(d, selectors.EVENT_READ)
+        while True:
+            for key, _ in sel.select(timeout=1):
+                for ev in key.fileobj.read():
+                    if ev.type == e.EV_KEY and ev.value == 1 and ev.code in BTN:
+                        GLib.idle_add(self.app.pad_action, BTN[ev.code])
+                    elif ev.type == e.EV_ABS:
+                        if ev.code == e.ABS_HAT0Y and ev.value:
+                            GLib.idle_add(self.app.pad_move, 1 if ev.value > 0 else -1)
+                        elif ev.code == e.ABS_HAT0X and ev.value:
+                            GLib.idle_add(self.app.pad_action,
+                                          "r1" if ev.value > 0 else "l1")
+                        elif ev.code == e.ABS_Y:
+                            # left stick, with a deadzone and a repeat throttle
+                            v = ev.value
+                            if abs(v) > 20000 and time.time() - self.last_axis > 0.18:
+                                self.last_axis = time.time()
+                                GLib.idle_add(self.app.pad_move, 1 if v > 0 else -1)
+
+
+SCAFFOLD = ("media", "gamelist.xml", "metadata.txt", "systeminfo.txt", "desktop.txt")
+# ES-DE ships non-ROM system dirs; never list these as manageable systems
+NONGAME = ("desktop", "emulators", "tools", "ps4", "custom-collections")
+
+
+def system_stats(system):
+    """(size, is_local, n_files) for a cartridge system, counting only ROM content.
+
+    Both union branches are scanned; a file counts as local when it is present in the
+    local branch. media/gamelist scaffolding is ignored so an ES-DE stub dir does not
+    read as a pulled system."""
+    ldir, ndir = os.path.join(ROM_LOCAL, system), os.path.join(ROM_NAS, system)
+    info = {}
+    for base, isloc in ((ndir, False), (ldir, True)):
+        if not os.path.isdir(base):
+            continue
+        for r, ds, fs in os.walk(base):
+            if "media" in os.path.relpath(r, base).split(os.sep):
+                continue                       # skip the media subtree
+            for fn in fs:
+                if fn in SCAFFOLD or fn.startswith("."):
+                    continue
+                rel = os.path.relpath(os.path.join(r, fn), base)
+                try:
+                    sz = os.path.getsize(os.path.join(r, fn))
+                except OSError:
+                    sz = 0
+                d = info.setdefault(rel, {"size": 0, "local": False})
+                d["size"] = max(d["size"], sz)
+                if isloc:
+                    d["local"] = True
+    if not info:
+        return 0, False, 0
+    total = sum(d["size"] for d in info.values())
+    all_local = all(d["local"] for d in info.values())
+    return total, all_local, len(info)
+
+
+class Row:
+    def __init__(self, kind, name):
+        self.kind = kind                       # "pc" or "roms"
+        self.name = name
+        base_l, base_n = (PC_LOCAL, PC_NAS) if kind == "pc" else (ROM_LOCAL, ROM_NAS)
+        self.local_path = os.path.join(base_l, name)
+        self.nas_path = os.path.join(base_n, name)
+        if kind == "roms":
+            self.size, self.is_local, self.n_files = system_stats(name)
+            # a whole-console collection: name it properly and say how many games it holds
+            self.label = "%s  —  %s games" % (
+                CART_NAME.get(name, name.replace("-", " ").title()), format(self.n_files, ","))
+        else:
+            self.is_local = os.path.exists(self.local_path)
+            src = self.local_path if self.is_local else self.nas_path
+            self.size = du(src) if os.path.isdir(src) else (
+                os.path.getsize(src) if os.path.exists(src) else 0)
+            self.n_files = 1
+            self.label = name
+            # a PC game "shows in Steam" when its generated launcher exists
+            if kind == "pc":
+                self.is_steam = os.path.exists(os.path.join(PC_LOCAL, name + ".sh"))
+
+
+import re as _re
+
+# Consoles with big per-file games -- worth choosing individually. Everything else is a
+# cartridge system with thousands of tiny ROMs, kept as a single all-or-nothing row.
+LARGE = ("gc", "wii", "wiiu", "switch", "switch-updates", "ps2", "psp", "psx", "saturn",
+         "dreamcast", "xbox", "segacd", "n3ds", "ps3", "ps4")
+# Consoles whose games are a DIRECTORY (a decrypted PS3 disc folder, a PS4 pkg set),
+# not one file -- enumerated dir-by-dir instead of file-by-file.
+FOLDER_CONSOLES = ("ps3", "ps4", "psvita", "xbox360")
+SYS_SHORT = {"gc": "GC", "wii": "Wii", "wiiu": "WiiU", "switch": "Switch",
+             "switch-updates": "Switch-Upd", "ps2": "PS2", "psp": "PSP", "psx": "PS1",
+             "saturn": "Saturn", "dreamcast": "DC", "xbox": "Xbox", "segacd": "SegaCD",
+             "n3ds": "3DS"}
+TAB_NAME = {"gc": "GameCube", "wii": "Wii", "wiiu": "Wii U", "switch": "Switch",
+            "switch-updates": "Switch Upd", "psx": "PS1", "ps2": "PS2", "psp": "PSP",
+            "saturn": "Saturn", "dreamcast": "Dreamcast", "xbox": "Xbox", "n3ds": "3DS",
+            "segacd": "Sega CD", "ps3": "PS3", "ps4": "PS4"}
+# Friendly names for the whole-console ROM collections shown on the Collections tab.
+CART_NAME = {"snes": "Super Nintendo", "nes": "NES", "n64": "Nintendo 64",
+             "gb": "Game Boy", "gbc": "Game Boy Color", "gba": "Game Boy Advance",
+             "nds": "Nintendo DS", "genesis": "Sega Genesis", "megadrive": "Mega Drive",
+             "mastersystem": "Master System", "gamegear": "Game Gear", "sega32x": "Sega 32X",
+             "tg16": "TurboGrafx-16", "pcengine": "PC Engine", "arcade": "Arcade",
+             "neogeo": "Neo Geo", "atari2600": "Atari 2600", "wonderswan": "WonderSwan",
+             "famicom": "Famicom", "sfc": "Super Famicom", "virtualboy": "Virtual Boy",
+             "pokemini": "Pokémon Mini", "ngp": "Neo Geo Pocket", "vectrex": "Vectrex"}
+TAB_ORDER = ["gc", "wii", "wiiu", "switch", "switch-updates", "n3ds",
+             "psx", "ps2", "psp", "ps3", "ps4", "saturn", "dreamcast", "segacd", "xbox"]
+_DISC = _re.compile(r"\s*\((?:Disc|CD|Track)\s*\d+\)", _re.I)
+
+
+def game_key(fn):
+    """Group a game's files: 'FF VII (Disc 1).chd' and '(Disc 2).chd' are one game,
+    as are 'Game.cue' + 'Game (Track 1).bin'."""
+    return _DISC.sub("", __import__("os").path.splitext(fn)[0]).strip()
+
+
+class GameRow:
+    """one individual title within a large console (may be several files)"""
+    def __init__(self, system, game, files, size, is_local):
+        self.kind = "game"
+        self.system = system
+        self.game = game
+        self.name = game
+        # folder-console games carry a .ps3/.ps4 marker in the dir name -- hide it in the UI
+        self.label = _re.sub(r"\.(ps3|ps4|psvita)$", "", game, flags=_re.I)
+        self.files = files                     # filenames within the system dir
+        self.size = size
+        self.is_local = is_local
+        self.local_path = os.path.join(ROM_LOCAL, system)
+        self.sfile = steam_file(files)
+        self.is_steam = os.path.lexists(os.path.join(SF_DIR, system, self.sfile))
+
+
+def enumerate_folder_games(system, ldir, ndir):
+    """PS3/PS4 etc.: each game is a directory (decrypted disc folder / pkg set). The whole
+    folder is one game -- the unit that gets copied offline and made a Steam shortcut."""
+    info = {}
+    for base, islocal in ((ndir, False), (ldir, True)):
+        if not os.path.isdir(base):
+            continue
+        for dn in os.listdir(base):
+            if dn.startswith(".") or dn in SKIP:
+                continue
+            p = os.path.join(base, dn)
+            if not os.path.isdir(p):
+                continue
+            d = info.setdefault(dn, {"size": 0, "local": False})
+            d["size"] = max(d["size"], du(p))
+            if islocal:
+                d["local"] = True
+    return [GameRow(system, dn, [dn], d["size"], [dn] if d["local"] else False)
+            for dn, d in sorted(info.items())]
+
+
+def enumerate_games(system):
+    ldir, ndir = os.path.join(ROM_LOCAL, system), os.path.join(ROM_NAS, system)
+    if system in FOLDER_CONSOLES:
+        return enumerate_folder_games(system, ldir, ndir)
+    info = {}
+    for base, islocal in ((ndir, False), (ldir, True)):
+        if not os.path.isdir(base):
+            continue
+        for fn in os.listdir(base):
+            if fn.startswith(".") or fn in SKIP:
+                continue
+            p = os.path.join(base, fn)
+            if not os.path.isfile(p):
+                continue
+            try:
+                sz = os.path.getsize(p)
+            except OSError:
+                sz = 0
+            d = info.setdefault(fn, {"size": 0, "local": False})
+            d["size"] = max(d["size"], sz)
+            if islocal:
+                d["local"] = True
+    groups = {}
+    for fn, d in info.items():
+        g = groups.setdefault(game_key(fn), {"files": [], "size": 0, "nloc": 0})
+        g["files"].append(fn)
+        g["size"] += d["size"]
+        g["nloc"] += 1 if d["local"] else 0
+    rows = []
+    for game, g in sorted(groups.items()):
+        rows.append(GameRow(system, game, g["files"], g["size"],
+                            g["nloc"] == len(g["files"]) and g["files"]))
+    return rows
+
+
+def sweep_partials():
+    """Remove *.part left over from a job that is no longer queued.
+
+    While a job IS queued the partials are resume data and must be kept -- the worker
+    skips files it has already transferred. Only orphans from an abandoned job are
+    swept, and the NAS copy is untouched either way."""
+    if os.path.exists(QUEUE):
+        return 0          # a job is pending; its .part files are resume data, not junk
+    freed = 0
+    for base in (PC_LOCAL, ROM_LOCAL):
+        if not os.path.isdir(base):
+            continue
+        for n in os.listdir(base):
+            if not n.endswith(".part"):
+                continue
+            p = os.path.join(base, n)
+            try:
+                freed += du(p) if os.path.isdir(p) else os.path.getsize(p)
+                shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+            except Exception:
+                pass
+    return freed
+
+
+def scan():
+    pc, roms = [], []
+    manifest = {}
+    try:
+        manifest = json.load(open(PC_MANIFEST))
+    except Exception:
+        pass
+    # Only PLAYABLE games belong on the PC tab. An installer -- a FitGirl / setup.exe
+    # repack that has not been installed yet (kind "wizard") -- is NOT playable, and
+    # neither is a raw scene release or anything unrecognised. You can only tick something
+    # you can actually run, so those are all hidden until they become a real installed game.
+    PLAYABLE = {"linux", "portable", "windows", "installed"}
+    playable = {k for k, v in manifest.items()
+                if isinstance(v, dict) and v.get("kind") in PLAYABLE}
+    seen = set()
+    for base in (PC_NAS, PC_LOCAL):
+        if not os.path.isdir(base):
+            continue
+        for n in sorted(os.listdir(base)):
+            if n.startswith(".") or n in SKIP or n in seen:
+                continue
+            if not os.path.isdir(os.path.join(base, n)):
+                continue
+            if n not in playable:            # installers / raw releases / unknown -> hidden
+                continue
+            seen.add(n)
+            pc.append(Row("pc", n))
+    sseen, games = set(), []
+    for base in (ROM_NAS, ROM_LOCAL):
+        if not os.path.isdir(base):
+            continue
+        for name in sorted(os.listdir(base)):
+            p = os.path.join(base, name)
+            if name.startswith(".") or name in sseen or not os.path.isdir(p):
+                continue
+            if not [f for f in os.listdir(p) if not f.startswith(".") and f not in SKIP]:
+                continue
+            sseen.add(name)
+            if name in LARGE:
+                games.extend(enumerate_games(name))    # individual titles
+            else:
+                if name in NONGAME:
+                    continue
+                row = Row("roms", name)
+                if row.n_files and row.size > 1024:     # skip empty / pure-scaffolding
+                    roms.append(row)
+    by_system = {}
+    for g in games:
+        by_system.setdefault(g.system, []).append(g)
+    for lst in by_system.values():
+        lst.sort(key=lambda r: r.name.lower())
+    return pc, roms, by_system
+
+
+def copy_with_progress(src, dst, report):
+    """shutil.copytree is a single blocking call with no callback, so a multi-GB game
+    looks frozen. Walk the tree and copy file by file so progress is visible."""
+    files, total = [], 0
+    for r, _, fs in os.walk(src):
+        for f in fs:
+            fp = os.path.join(r, f)
+            try:
+                sz = os.path.getsize(fp)
+            except OSError:
+                sz = 0
+            files.append((fp, sz))
+            total += sz
+    done, last = 0, 0.0
+    os.makedirs(dst, exist_ok=True)
+    for fp, sz in files:
+        rel = os.path.relpath(fp, src)
+        out = os.path.join(dst, rel)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        shutil.copy2(fp, out)
+        done += sz
+        now = time.time()
+        if now - last > 0.25:                 # throttle: do not flood the UI
+            last = now
+            report(done, total, rel)
+    report(done, total, "")
+    return total
+
+
+def write_launchers(desired=None):
+    """One launcher per PC game that should be on the Deck.
+
+    SRM globs this directory, so writing/removing a launcher is what adds or removes the
+    Steam shortcut. Games needing a manual install are skipped -- no shortcut is created
+    for something that cannot start.
+
+    `desired` is the set of games that will be local once the queued copies finish. A
+    PC game cannot run from the read-only NAS branch, so only those get a shortcut --
+    and they get it immediately, so the Steam restart happens when you press Apply
+    rather than unpredictably later when a copy completes.
+    """
+    try:
+        games = json.load(open(PC_MANIFEST))
+    except Exception:
+        return 0, 0
+    os.makedirs(PC_LOCAL, exist_ok=True)
+    wanted, made = set(), 0
+    for name, g in games.items():
+        kind = g.get("kind")
+        if kind not in ("linux", "portable", "windows", "installed") or not g.get("entry"):
+            continue                       # installers/wizards get no shortcut
+        if desired is not None and name not in desired:
+            continue                       # not wanted on this Deck
+        if desired is None and not os.path.exists(os.path.join(PC_LOCAL, name)):
+            continue                       # only games actually present
+        target = os.path.join(PC_UNION, name, g["entry"])
+        out = os.path.join(PC_LOCAL, name + ".sh")
+        wanted.add(os.path.basename(out))
+        if kind in ("windows", "installed"):
+            # a Windows game needs Proton, not a bare exec: run it through the Deck's
+            # newest Proton in a per-game prefix.
+            body = ('#!/bin/bash\n# generated by Offline Manager (Proton)\n'
+                    'export STEAM_COMPAT_CLIENT_INSTALL_PATH="$HOME/.steam/steam"\n'
+                    'export STEAM_COMPAT_DATA_PATH="$HOME/.proton-prefixes/%s"\n'
+                    'mkdir -p "$STEAM_COMPAT_DATA_PATH"\n'
+                    'P=$(ls -d "$HOME"/.steam/steam/steamapps/common/Proton*/proton 2>/dev/null | sort -V | tail -1)\n'
+                    'cd %s || exit 1\nexec "$P" run %s "$@"\n'
+                    % (name, repr(os.path.dirname(target)), repr(target)))
+        else:
+            body = ('#!/bin/bash\n# generated by Offline Manager\ncd %s || exit 1\nexec %s "$@"\n'
+                    % (repr(os.path.dirname(target)), repr(target)))
+        try:
+            if not os.path.exists(out) or open(out).read() != body:
+                open(out, "w").write(body)
+                os.chmod(out, 0o755)
+            made += 1
+        except Exception:
+            pass
+    # drop launchers whose game is gone, so SRM removes the stale shortcut
+    removed = 0
+    for f in os.listdir(PC_LOCAL):
+        if f.endswith(".sh") and f not in wanted:
+            try:
+                os.remove(os.path.join(PC_LOCAL, f)); removed += 1
+            except Exception:
+                pass
+    return made, removed
+
+
+def srm_add():
+    """Add/remove Steam shortcuts. Safe with Steam running: only CATEGORY writes need
+    Steam stopped, and those are handled by the full srm-refresh later."""
+    if not os.path.exists(SRM):
+        return "SRM not found"
+    env = dict(os.environ)
+    env.setdefault("DISPLAY", ":0")
+    try:
+        r = subprocess.run([SRM, "--no-sandbox", "add"], capture_output=True, text=True,
+                           timeout=900, env=env)
+        return "Steam shortcuts synced" if r.returncode == 0 else \
+            "SRM failed (%s)" % (r.stderr or r.stdout or "")[-60:]
+    except Exception as ex:
+        return "SRM error: %s" % ex
+
+
+class Page(Gtk.Box):
+    """one tab: a checklist"""
+    def __init__(self, app, empty_text, steam_col=False):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.app = app
+        self.steam_col = steam_col
+        # cols: offline(bool) steam(bool) name where size obj
+        self.store = Gtk.ListStore(bool, bool, str, str, str, object)
+        self.view = Gtk.TreeView(model=self.store)
+        self.view.set_activate_on_single_click(True)
+        self.view.set_enable_search(False)
+        self.view.connect("row-activated", self.on_activate)
+
+        t = Gtk.CellRendererToggle()
+        t.set_property("xpad", 14)
+        t.connect("toggled", self.on_toggled)
+        self.off_col = Gtk.TreeViewColumn("Offline", t, active=0)
+        self.off_col.set_min_width(120)
+        self.view.append_column(self.off_col)
+        self.steam_toggle_col = None
+        if steam_col:
+            t2 = Gtk.CellRendererToggle()
+            t2.set_property("xpad", 14)
+            t2.connect("toggled", self.on_steam_toggled)
+            self.steam_toggle_col = Gtk.TreeViewColumn("Steam", t2, active=1)
+            self.steam_toggle_col.set_min_width(110)
+            self.view.append_column(self.steam_toggle_col)
+        for i, (title, expand, width) in enumerate(
+                (("Name", True, 420), ("Where", False, 140), ("Size", False, 140)), start=2):
+            r = Gtk.CellRendererText()
+            r.set_property("ypad", 10)
+            if i == 1:
+                r.set_property("ellipsize", Pango.EllipsizeMode.END)
+            c = Gtk.TreeViewColumn(title, r, text=i)
+            c.set_expand(expand)
+            c.set_min_width(width)
+            self.view.append_column(c)
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.add(self.view)
+        self.pack_start(sw, True, True, 0)
+        self.empty = Gtk.Label(label=empty_text)
+        self.empty.get_style_context().add_class("hint")
+        self.pack_start(self.empty, False, False, 8)
+        self.rows = []
+
+    def load(self, rows):
+        self.rows = rows
+        self.store.clear()
+        for r in rows:
+            self.store.append([r.is_local, getattr(r, "is_steam", False),
+                               getattr(r, "label", r.name),
+                               "on Deck" if r.is_local else "NAS", human(r.size), r])
+        self.empty.set_visible(not rows)
+        if rows:
+            self.view.set_cursor(0)
+
+    def on_toggled(self, _c, path):
+        self.store[path][0] = not self.store[path][0]
+        self.app.update_totals()
+
+    def on_steam_toggled(self, _c, path):
+        self.store[path][1] = not self.store[path][1]
+
+    def on_activate(self, _v, path, _c):
+        self.toggle_at(path, 0)
+
+    def toggle_at(self, path, col):
+        col = col if (col == 0 or self.steam_col) else 0
+        self.store[path][col] = not self.store[path][col]
+        if col == 0:
+            self.app.update_totals()
+
+    def toggle_current(self, col=0):
+        sel = self.view.get_selection().get_selected()[1]
+        if sel is not None:
+            self.toggle_at(self.store.get_path(sel), col)
+
+    def selected_bytes(self):
+        return sum(r.size for i, r in enumerate(self.rows) if self.store[i][0])
+
+    def pending(self):
+        pulls, drops = [], []
+        for i, r in enumerate(self.rows):
+            if self.store[i][0] and not r.is_local:
+                pulls.append(r)
+            elif not self.store[i][0] and r.is_local:
+                drops.append(r)
+        return pulls, drops
+
+    def steam_pending(self):
+        """(add, remove) GameRows whose Steam checkbox differs from disk"""
+        add, rem = [], []
+        if not self.steam_col:
+            return add, rem
+        for i, r in enumerate(self.rows):
+            want = self.store[i][1]
+            if want and not r.is_steam:
+                add.append(r)
+            elif not want and r.is_steam:
+                rem.append(r)
+        return add, rem
+
+
+class SavesPage(Gtk.Box):
+    """Emulator saves on the NAS, filed under this Deck's Steam account.
+
+    A background service (deck-saves-daemon) pushes saves up when a game exits and pulls
+    them down when this Deck is idle and the NAS copy is newer, so a profile resumes on
+    whichever Deck you pick up. These buttons are for forcing it, or for settling a
+    conflict the daemon refused to guess at."""
+    is_saves = True
+    steam_col = False
+    view = None
+
+    def __init__(self, app):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.app = app
+        self.rows = []
+        self.set_border_width(20)
+        self.status = Gtk.Label(xalign=0)
+        self.status.get_style_context().add_class("big")
+        self.pack_start(self.status, False, False, 0)
+        self.warn = Gtk.Label(xalign=0)
+        self.warn.set_line_wrap(True)
+        self.pack_start(self.warn, False, False, 0)
+        self.btns, self.actions = [], ["backup", "restore"]
+        for label in ("Back up now      this Deck  \u2192  NAS",
+                      "Restore          NAS  \u2192  this Deck"):
+            b = Gtk.Button(label=label)
+            b.set_size_request(460, 62)
+            self.btns.append(b)
+            self.pack_start(b, False, False, 0)
+        self.btns[0].connect("clicked", lambda *_: self.run("backup"))
+        self.btns[1].connect("clicked", lambda *_: self.run("restore"))
+        self.prog = Gtk.Label(xalign=0)
+        self.prog.get_style_context().add_class("hint")
+        self.pack_start(self.prog, False, False, 0)
+        self.focus = 0
+        self.busy = False
+        self.refresh()
+
+    # ---- App-compat no-ops: the App treats every tab the same ----
+    def selected_bytes(self):
+        return 0
+
+    def pending(self):
+        return [], []
+
+    def steam_pending(self):
+        return [], []
+
+    def load(self, *_):
+        pass
+
+    # ---- gamepad ----
+    def move_focus(self, delta):
+        self.focus = max(0, min(len(self.btns) - 1, self.focus + delta))
+        self.highlight()
+
+    def highlight(self):
+        self.btns[self.focus].grab_focus()
+
+    def toggle_current(self, *_):
+        self.run(self.actions[self.focus])
+
+    # ---- state ----
+    def refresh(self):
+        import subprocess
+        try:
+            out = subprocess.run(["bash", os.path.expanduser("~/deck-saves.sh"), "status"],
+                                 capture_output=True, text=True, timeout=90).stdout
+            kv = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+        except Exception:
+            kv = {}
+        lb, when, where = kv.get("last_backup", ""), "never", ""
+        if lb and lb != "none":
+            try:
+                import time as _t
+                parts = lb.split("\t")
+                when = _t.strftime("%b %d  %H:%M", _t.localtime(int(parts[0])))
+                if len(parts) > 1:
+                    where = "  (from %s)" % parts[1]
+            except Exception:
+                when = lb
+        auto = kv.get("auto", "unknown")
+        auto_txt = ("<span foreground='#7fdc7f'>on</span>" if auto == "active"
+                    else "<span foreground='#ff8a8a'>OFF (%s)</span>" % auto)
+        self.status.set_markup(
+            "Steam account <b>%s</b>        Auto-sync: %s\n"
+            "On this Deck: <b>%s</b>        On NAS: <b>%s</b>\n"
+            "Last backup: <b>%s</b>%s"
+            % (kv.get("account", "?"), auto_txt,
+               human(int(kv.get("local_bytes", 0) or 0)),
+               human(int(kv.get("nas_bytes", 0) or 0)), when, where))
+        conflict = kv.get("conflict", "none")
+        if conflict and conflict != "none":
+            self.warn.set_markup(
+                "<span foreground='#ffc46b'><b>Conflict.</b> This Deck has saves it never "
+                "pushed, and the NAS copy is newer. Nothing was overwritten. Pick one: "
+                "<b>Back up now</b> keeps this Deck's saves, <b>Restore</b> takes the NAS "
+                "copy.</span>")
+        elif kv.get("dirty") == "1":
+            self.warn.set_markup("<small>Unsaved progress on this Deck \u2014 it will be "
+                                 "pushed automatically when you close your next game.</small>")
+        else:
+            self.warn.set_markup("<small>In sync with the NAS.</small>")
+
+    def run(self, action):
+        if self.busy:
+            return
+        self.busy = True
+        self.prog.set_text("%s running\u2026" % action.title())
+        import threading
+
+        def work():
+            import subprocess
+            try:
+                r = subprocess.run(["bash", os.path.expanduser("~/deck-saves.sh"), action],
+                                   capture_output=True, text=True, timeout=3600)
+                msg = (r.stdout or r.stderr or "").strip().splitlines()
+                msg = msg[-1] if msg else "done"
+            except Exception as e:
+                msg = "failed: %s" % e
+            GLib.idle_add(self._done, msg)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _done(self, msg):
+        self.busy = False
+        self.prog.set_text(msg)
+        self.refresh()
+        return False
+
+
+class App(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Offline Manager")
+        self.set_default_size(1280, 800)
+        self.fullscreen()
+        css = Gtk.CssProvider()
+        css.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        outer.set_border_width(16)
+        self.add(outer)
+
+        self.title = Gtk.Label(xalign=0)
+        self.title.get_style_context().add_class("big")
+        outer.pack_start(self.title, False, False, 0)
+
+        self.bar = Gtk.LevelBar()
+        self.bar.set_size_request(-1, 18)
+        outer.pack_start(self.bar, False, False, 0)
+
+        self.nb = Gtk.Notebook()
+        self.nb.set_scrollable(True)
+        self.pc_page = Page(self, "No playable PC games installed yet — installers stay hidden until installed.",
+                            steam_col=True)
+        self.rom_page = Page(self, "No console collections found.")
+        self.nb.append_page(self.pc_page, Gtk.Label(label="  PC Games  "))
+        self.nb.append_page(self.rom_page, Gtk.Label(label="  Collections  "))
+        # one tab per large console that actually has games (built from a first scan)
+        _, _, _by = scan()
+        self.console_pages = {}
+        for sysid in TAB_ORDER:
+            if sysid in _by:
+                pg = Page(self, "No games.", steam_col=True)
+                self.nb.append_page(pg, Gtk.Label(label="  %s  " % TAB_NAME.get(sysid, sysid)))
+                self.console_pages[sysid] = pg
+        self.saves_page = SavesPage(self)
+        self.nb.append_page(self.saves_page, Gtk.Label(label="  Saves  "))
+        self.pages = [self.pc_page, self.rom_page] + list(self.console_pages.values()) + [self.saves_page]
+        outer.pack_start(self.nb, True, True, 0)
+        self.focus_label = Gtk.Label(xalign=0)
+        self.focus_label.get_style_context().add_class("hint")
+        outer.pack_start(self.focus_label, False, False, 0)
+
+        # Inline confirmation: a modal Gtk dialog runs its own event loop, so the
+        # gamepad thread's actions never reach it and A/B would do nothing.
+        self.banner = Gtk.Label(xalign=0)
+        self.banner.set_line_wrap(True)
+        self.banner.set_no_show_all(True)
+        outer.pack_start(self.banner, False, False, 0)
+
+        self.progress = Gtk.ProgressBar(show_text=True)
+        outer.pack_start(self.progress, False, False, 0)
+
+        bar = Gtk.Box(spacing=10)
+        self.apply_btn = Gtk.Button(label="Apply  (Y)")
+        self.apply_btn.connect("clicked", self.on_apply)
+        rescan = Gtk.Button(label="Rescan  (⧉ View)")
+        rescan.connect("clicked", lambda *_: self.reload())
+        close = Gtk.Button(label="Close  (B)")
+        close.connect("clicked", lambda *_: self.quit_app())
+        bar.pack_start(self.apply_btn, False, False, 0)
+        bar.pack_start(rescan, False, False, 0)
+        bar.pack_end(close, False, False, 0)
+        outer.pack_start(bar, False, False, 0)
+
+        hint = Gtk.Label(xalign=0)
+        hint.set_text("D-pad = move / switch tab    •    A = keep Offline    •    "
+                      "X = show in Steam    •    Y = apply    •    B = close")
+        hint.get_style_context().add_class("hint")
+        outer.pack_start(hint, False, False, 0)
+
+        self.sync_label = Gtk.Label(xalign=0)
+        self.sync_label.get_style_context().add_class("hint")
+        outer.pack_start(self.sync_label, False, False, 0)
+
+        self.pad_label = Gtk.Label(xalign=0)
+        self.pad_label.get_style_context().add_class("hint")
+        outer.pack_start(self.pad_label, False, False, 0)
+
+        self.dirty = False
+        self.confirm = None
+        self.busy = False
+        self.connect("delete-event", lambda *_: (self.quit_app(), True)[1])
+        self.connect("key-press-event", self.on_key)
+        self.reload()
+        self.pad = Gamepad(self)
+        self.pad.start()
+
+    def quit_app(self):
+        # Copying happens in a systemd service now, so closing here never cancels it.
+        """Exit. If anything changed, regenerate the launchers and leave a flag; the
+        launcher script then kicks off a FULL srm-refresh once this app is gone.
+
+        It cannot run here: a full refresh stops Steam, which would kill this process
+        mid-way, and srm-refresh's own guard refuses to run while a Steam-launched app
+        (this one) is still alive."""
+        if self.dirty:
+            try:
+                write_launchers()          # flag was already written in finish()
+            except Exception:
+                pass
+        Gtk.main_quit()
+
+    def set_pad_status(self, text):
+        self.pad_label.set_text(text)
+        return False
+
+    def _grab(self):
+        pg = self.page()
+        if getattr(pg, "is_saves", False):
+            pg.highlight()
+        elif getattr(pg, "view", None) is not None:
+            pg.view.grab_focus()
+        self.update_focus_hint()
+
+    def pad_move(self, delta):
+        """D-pad / stick moves the highlighted row"""
+        pg = self.page()
+        if getattr(pg, "is_saves", False):
+            pg.move_focus(delta); return False
+        if not pg.rows:
+            return False
+        path, _ = pg.view.get_cursor()
+        i = (path.get_indices()[0] if path else 0) + delta
+        i = max(0, min(i, len(pg.rows) - 1))
+        pg.view.set_cursor(i)
+        pg.view.scroll_to_cell(i)
+        return False
+
+    def pad_action(self, name):
+        if self.confirm is not None:            # confirmation is showing
+            if name == "a":
+                self.do_apply()
+            elif name == "b":
+                self.hide_banner()
+            return False
+        if name == "a":
+            self.page().toggle_current(0)
+        elif name == "b":
+            if self.banner.get_visible():
+                self.hide_banner()
+            else:
+                self.quit_app()
+        elif name == "x":
+            self.toggle_steam_current()
+        elif name == "y":
+            self.on_apply(None)
+        elif name == "l1":
+            self.nb.prev_page(); self._grab()
+        elif name == "r1":
+            self.nb.next_page(); self._grab()
+        elif name == "select":
+            self.reload()
+        return False
+
+    def toggle_steam_current(self):
+        """X marks the highlighted game as a Steam shortcut (or unmarks it)."""
+        pg = self.page()
+        if getattr(pg, "is_saves", False) or not getattr(pg, "steam_col", False):
+            return False
+        pg.toggle_current(1)
+        return False
+
+    def update_focus_hint(self):
+        pg = self.page()
+        if getattr(pg, "steam_col", False):
+            self.focus_label.set_text(
+                "A = keep this game Offline    •    X = show it in Steam    "
+                "(only Steam changes restart Steam at Apply)")
+        elif getattr(pg, "is_saves", False):
+            self.focus_label.set_text("A = run the highlighted backup / restore")
+        else:
+            self.focus_label.set_text("A = keep this collection Offline")
+
+    def page(self):
+        return self.nb.get_nth_page(self.nb.get_current_page())
+
+    def poll_progress(self):
+        """Show the background worker's state; keep polling while it is running."""
+        try:
+            p = json.load(open(PROGRESS))
+        except Exception:
+            return os.path.exists(QUEUE)          # queued but not started yet
+        st = p.get("state")
+        if st in ("copying", "freeing"):
+            tot, done = max(p.get("total", 1), 1), p.get("done", 0)
+            it, itt = p.get("item_done", 0), max(p.get("item_total", 1), 1)
+            rate = p.get("rate", 0)
+            eta = (itt - it) / rate if rate > 1000 else 0
+            self.progress.set_fraction(min(done / tot, 1.0))
+            self.progress.set_text("%s %s   %s / %s   %s/s%s"
+                                   % (st, p.get("name", "")[:26], human(it), human(itt),
+                                      human(rate),
+                                      "   ~%dm%02ds" % (eta // 60, eta % 60) if eta else ""))
+            return True
+        self.progress.set_fraction(1.0)
+        self.progress.set_text("Background copy finished — Steam updates shortly")
+        self.reload()
+        return False
+
+    def last_sync_note(self):
+        """A previous exit may have failed to reach Steam (guard aborted, Deck slept).
+        Say so plainly instead of leaving it invisible."""
+        pending = os.path.exists(os.path.join(HOME, ".offline-manager-dirty"))
+        log = os.path.join(HOME, "offline-manager-sync.log")
+        last = ""
+        try:
+            lines = [l.strip() for l in open(log) if l.strip()]
+            last = lines[-1][:70] if lines else ""
+        except Exception:
+            pass
+        if pending:
+            self.sync_label.set_text("Steam sync PENDING from a previous session — "
+                                     "it will run when you exit.  " + last)
+        elif last:
+            self.sync_label.set_text("last Steam sync: " + last)
+        else:
+            self.sync_label.set_text("")
+
+    def reload(self):
+        if os.path.exists(QUEUE):
+            GLib.timeout_add(1000, self.poll_progress)
+        freed = sweep_partials()
+        if freed:
+            self.show_banner("Cleaned up %s of interrupted copy data." % human(freed), "error")
+        pc, roms, by_system = scan()
+        self.pc_page.load(pc)
+        self.rom_page.load(roms)
+        for sysid, pg in self.console_pages.items():
+            pg.load(by_system.get(sysid, []))
+        self.update_totals()
+        self.last_sync_note()
+        if hasattr(self, "saves_page"):
+            self.saves_page.refresh()
+        self._grab()
+
+    def update_totals(self):
+        want = sum(pg.selected_bytes() for pg in self.pages)
+        have_local = sum(r.size for pg in self.pages for r in pg.rows if r.is_local)
+        projected = free_bytes() + have_local - want
+        used = total_bytes() - projected
+        self.bar.set_max_value(max(total_bytes(), 1))
+        self.bar.set_value(max(0, min(used, total_bytes())))
+        self.title.set_markup(
+            "Keep offline: <b>%s</b>     Free now: <b>%s</b>     After apply: <b>%s</b>"
+            % (human(want), human(free_bytes()), human(max(projected, 0))))
+
+    def on_key(self, _w, ev):
+        k = Gdk.keyval_name(ev.keyval) or ""
+        if self.confirm is not None:
+            if k in ("space", "Return", "KP_Enter", "a", "A"):
+                self.do_apply()
+            elif k in ("Escape", "b", "B"):
+                self.hide_banner()
+            return True
+        if k in ("Left",):
+            self.nb.prev_page(); self._grab(); return True
+        if k in ("Right",):
+            self.nb.next_page(); self._grab(); return True
+        if k in ("space", "Return", "KP_Enter"):
+            self.page().toggle_current(0); return True
+        if k in ("y", "Y"):
+            self.on_apply(None); return True
+        if k in ("x", "X"):
+            self.toggle_steam_current(); return True
+        if k in ("F5",):
+            self.reload(); return True
+        if k in ("Escape", "b", "B"):
+            if self.banner.get_visible():
+                self.hide_banner()
+            else:
+                self.quit_app()
+            return True
+        # L1/R1 commonly arrive as these
+        if k in ("Page_Up", "bracketleft", "l", "L"):
+            self.nb.prev_page(); self._grab(); return True
+        if k in ("Page_Down", "bracketright", "r", "R", "Tab"):
+            self.nb.next_page(); self._grab(); return True
+        return False
+
+    def on_apply(self, _b):
+        pulls, drops, sadd, srem = [], [], [], []
+        for pg in self.pages:
+            p, d = pg.pending()
+            pulls += p; drops += d
+            a, r = pg.steam_pending()
+            sadd += a; srem += r
+        if not pulls and not drops and not sadd and not srem:
+            self.title.set_markup("<b>Nothing to change.</b>")
+            return
+        need = sum(r.size for r in pulls)
+        if need > free_bytes():
+            self.show_banner("Not enough space — need %s, only %s free.    B = dismiss"
+                             % (human(need), human(free_bytes())), "error")
+            self.confirm = None
+            return
+        self.confirm = (pulls, drops, sadd, srem)
+        steam_note = ""
+        if sadd or srem:
+            steam_note = "     Steam: +%d / -%d shortcut(s)" % (len(sadd), len(srem))
+        self.show_banner(
+            "Apply?   Copy to Deck: %d (%s)     Free from Deck: %d%s\n"
+            "The NAS copies are not touched.        A = confirm      B = cancel"
+            % (len(pulls), human(need), len(drops), steam_note), "confirm")
+
+    def show_banner(self, text, style):
+        ctx = self.banner.get_style_context()
+        for c in ("confirm", "error"):
+            ctx.remove_class(c)
+        ctx.add_class(style)
+        self.banner.set_text(text)
+        self.banner.show()
+
+    def hide_banner(self):
+        self.banner.hide()
+        self.confirm = None
+
+    def do_apply(self):
+        """Hand the work to the background worker and return at once.
+
+        Copying inside this process meant closing the app killed the transfer. The
+        worker is a systemd user service, so you can queue a 15GB game, close this, and
+        go play while it copies."""
+        pulls, drops, sadd, srem = self.confirm
+        self.hide_banner()
+        # Console Steam picks are instant symlinks. PC picks are launchers, handled below.
+        for r in sadd:
+            if getattr(r, "kind", None) == "game":
+                try:
+                    set_steam(r.system, r.sfile, True)
+                except Exception:
+                    pass
+        for r in srem:
+            if getattr(r, "kind", None) == "game":
+                try:
+                    set_steam(r.system, r.sfile, False)
+                except Exception:
+                    pass
+
+        def pull_job(r):
+            if getattr(r, "kind", None) == "game":
+                return {"name": r.name, "kind": "game", "system": r.system, "size": r.size,
+                        "files": [{"nas": os.path.join(ROM_NAS, r.system, fn),
+                                   "local": os.path.join(ROM_LOCAL, r.system, fn)}
+                                  for fn in r.files]}
+            return {"name": r.name, "nas": r.nas_path, "local": r.local_path, "size": r.size}
+
+        def drop_job(r):
+            if getattr(r, "kind", None) == "game":
+                return {"name": r.name, "kind": "game", "system": r.system,
+                        "files": [os.path.join(ROM_LOCAL, r.system, fn) for fn in r.files]}
+            return {"name": r.name, "local": r.local_path}
+
+        job = {"pulls": [pull_job(r) for r in pulls],
+               "drops": [drop_job(r) for r in drops]}
+        try:
+            tmp = QUEUE + ".tmp"
+            json.dump(job, open(tmp, "w"))
+            os.replace(tmp, QUEUE)          # appearing triggers the worker path unit
+        except Exception as e:
+            self.show_banner("Could not queue the job: %s" % e, "error")
+            return
+        # PC Steam shortcuts are launchers, driven by the PC "Steam" checkbox (NOT the
+        # Offline one) -- so a title only lands in Steam if you actually enabled Steam for
+        # it. The Steam stop/restart + SRM re-run happens ONLY when a Steam-showing toggle
+        # changed (console or PC); an offline-only change copies quietly with no restart.
+        pc_steam_want = {r.name for i, r in enumerate(self.pc_page.rows)
+                         if self.pc_page.store[i][1]}
+        steam_changed = bool(sadd or srem)
+        try:
+            write_launchers(pc_steam_want)
+            if steam_changed:
+                open(os.path.join(HOME, ".offline-manager-dirty"), "w").write("apply\n")
+        except Exception:
+            pass
+        self.dirty = steam_changed
+        self.confirm = None
+        # Nothing left for this app to do: the worker copies and the sync service
+        # refreshes Steam. Close immediately rather than lingering.
+        self.show_banner("Applying — closing. Steam will refresh; copying continues "
+                         "in the background.", "confirm")
+        GLib.timeout_add(1200, lambda: (Gtk.main_quit(), False)[1])
+
+    def worker(self, pulls, drops):
+        # weight by bytes so the bar reflects real work; drops are near-instant
+        total = max(sum(r.size for r in pulls), 1)
+        done = 0
+        for r in drops:
+            GLib.idle_add(self.status, "Freeing: %s" % r.name, done / total)
+            try:
+                shutil.rmtree(r.local_path) if os.path.isdir(r.local_path) else os.remove(r.local_path)
+            except Exception as e:
+                GLib.idle_add(self.status, "Failed to free %s: %s" % (r.name, e), done / total)
+        for idx, r in enumerate(pulls):
+            base = done / total
+            span = 1.0 / total
+            GLib.idle_add(self.status, "Copying %s (%s)…" % (r.name, human(r.size)), base)
+            tmp = r.local_path + ".part"
+            t0 = time.time()
+
+            def report(b, tot, rel, _r=r, _base=base, _span=span, _t0=t0):
+                pct = (b / tot) if tot else 1.0
+                el = max(time.time() - _t0, 0.001)
+                rate = b / el
+                eta = (tot - b) / rate if rate > 1000 else 0
+                GLib.idle_add(self.status,
+                              "%s   %s / %s  (%d%%)   %s/s%s"
+                              % (_r.name, human(b), human(tot), pct * 100, human(rate),
+                                 "   ~%dm%02ds left" % (eta // 60, eta % 60) if eta else ""),
+                              _base + _span * pct)
+
+            try:
+                os.makedirs(os.path.dirname(r.local_path), exist_ok=True)
+                shutil.rmtree(tmp, ignore_errors=True)
+                if os.path.isdir(r.nas_path):
+                    copy_with_progress(r.nas_path, tmp, report)
+                    os.rename(tmp, r.local_path)
+                else:
+                    shutil.copy2(r.nas_path, tmp)
+                    os.replace(tmp, r.local_path)
+                # the read-only NAS mount strips the execute bit; restore it
+                subprocess.run(["bash", "-c",
+                                'find %s -type d -exec chmod u+rwx {} + 2>/dev/null; '
+                                'find %s \\( -iname "*.exe" -o -iname "*.sh" -o -iname "*.AppImage" '
+                                '-o -iname "*.x86_64" \\) -exec chmod +x {} + 2>/dev/null'
+                                % (repr(r.local_path), repr(r.local_path))], check=False)
+            except Exception as e:
+                shutil.rmtree(tmp, ignore_errors=True)
+                GLib.idle_add(self.status, "Failed copying %s: %s" % (r.name, e), done / total)
+            done += r.size
+        GLib.idle_add(self.finish)
+
+    def status(self, text, frac):
+        self.progress.set_fraction(max(0.0, min(1.0, frac)))
+        self.progress.set_text(text[:80])
+        return False
+
+    def finish(self):
+        self.busy = False
+        self.dirty = True
+        # Persist immediately: if this process dies before quit_app() runs, the flag is
+        # still on disk so the sync is not lost.
+        try:
+            write_launchers()
+            open(os.path.join(HOME, ".offline-manager-dirty"), "w").write("changes applied\n")
+        except Exception:
+            pass          # changes saved; Steam gets synced when we exit
+        self.progress.set_fraction(1.0)
+        self.progress.set_text("Done — Steam will be updated on exit")
+        self.apply_btn.set_sensitive(True)
+        self.reload()
+        return False
+
+
+if __name__ == "__main__":
+    w = App()
+    w.connect("destroy", Gtk.main_quit)
+    w.show_all()
+    Gtk.main()

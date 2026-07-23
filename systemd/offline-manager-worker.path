@@ -1,0 +1,7 @@
+[Unit]
+Description=Watch for queued Offline Manager copies
+[Path]
+PathExists=%h/.offline-manager-queue.json
+Unit=offline-manager-worker.service
+[Install]
+WantedBy=default.target

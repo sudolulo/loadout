@@ -1,0 +1,12 @@
+[Unit]
+Description=Offline Manager background copy worker
+StartLimitIntervalSec=600
+StartLimitBurst=10
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+ExecStart=/usr/bin/python3 %h/offline-worker.py
+Restart=on-failure
+RestartSec=30
