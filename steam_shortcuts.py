@@ -122,6 +122,64 @@ def add_shortcut(vdf_path, appname, exe, start_dir, icon="", tags=None):
     return aid, True
 
 
+import re as _re
+_ROMPAT = _re.compile(r"\.steam-shortcuts/([^/]+)/")
+
+
+def _ci(d, key):
+    for k, v in d:
+        if k.lower() == key.lower():
+            return v
+    return ""
+
+
+def learn_templates(root):
+    """Learn each system's Steam launch template from the existing (SRM-made) shortcuts, so
+    Loadout can add matching shortcuts natively -- games then launch identically and SRM is no
+    longer needed. Returns {sysid: {exe, lo, start_dir, tag}} with the rom path -> '{ROM}'.
+
+    Keyed by the system DIR under .steam-shortcuts/<sysid>/ (Loadout's own system ids), which is
+    what set_steam() symlinks into."""
+    out = {}
+    for _idx, entry in _entries(root):
+        exe, lo = str(_ci(entry, "Exe")), str(_ci(entry, "LaunchOptions"))
+        m = _ROMPAT.search(exe) or _ROMPAT.search(lo)
+        if not m or m.group(1) in out:
+            continue
+        sysid = m.group(1)
+
+        def slot(s):                       # replace the quoted rom path for THIS sysid with {ROM}
+            return _re.sub(r'"[^"]*\.steam-shortcuts/%s/[^"]*"' % _re.escape(sysid), '"{ROM}"', s)
+
+        tags = _ci(entry, "tags")
+        out[sysid] = {"exe": slot(exe), "lo": slot(lo),
+                      "start_dir": str(_ci(entry, "StartDir")),
+                      "tag": tags[0][1] if isinstance(tags, list) and tags else ""}
+    return out
+
+
+def _entry_pairs(appname, exe, start_dir, lo, icon, tags):
+    aid = app_id(exe, appname)
+    return aid, [
+        ("appid", struct.unpack("<i", struct.pack("<I", aid))[0]),
+        ("AppName", appname), ("Exe", exe), ("StartDir", start_dir),
+        ("icon", icon), ("ShortcutPath", ""), ("LaunchOptions", lo),
+        ("IsHidden", 0), ("AllowDesktopConfig", 1), ("AllowOverlay", 1),
+        ("OpenVR", 0), ("Devkit", 0), ("DevkitGameID", ""), ("DevkitOverrideAppID", 0),
+        ("LastPlayTime", 0),
+        ("tags", [(str(i), t) for i, t in enumerate(tags)]),
+    ]
+
+
+def game_entry(appname, tmpl, rom_path, icon=""):
+    """Build a Steam shortcut entry for a game from a learned template + its rom symlink path.
+    Returns (app_id, entry_pairs)."""
+    exe = tmpl["exe"].replace("{ROM}", rom_path)
+    lo = tmpl["lo"].replace("{ROM}", rom_path)
+    return _entry_pairs(appname, exe, tmpl["start_dir"], lo, icon,
+                        [tmpl["tag"]] if tmpl.get("tag") else [])
+
+
 def place_art(grid_dir, aid, portrait=None, hero=None, logo=None, landscape=None, icon=None):
     """Drop library art for `aid` into userdata/<id>/config/grid/. Safe (files only)."""
     os.makedirs(grid_dir, exist_ok=True)
