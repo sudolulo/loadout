@@ -2,6 +2,18 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.14.1] - 2026-07-23
+### Fixed
+- **Save filters are now `--filter` rules.** rclone logs an error when `--include` and `--exclude`
+  are mixed — "the order they are parsed in is indeterminate" — which is exactly the ordering the
+  PC-save filter depended on. The rules are explicit first-match-wins filters now, ending in a
+  catch-all exclude, and are passed as an argument array (a filter rule contains a space, which
+  unquoted word splitting would tear in half).
+- **The Saves page reported auto-sync as inactive even while it was running.** The status check
+  still named the pre-container `deck-saves-daemon` unit instead of `loadout-saves.service`, and
+  printed a stray second line because `systemctl is-active` both prints its answer and exits
+  non-zero.
+
 ## [0.14.0] - 2026-07-23
 ### Fixed
 - **Save sync has been broken since 0.7.2 and now works again.** Containerising Loadout deleted

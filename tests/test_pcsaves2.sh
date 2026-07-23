@@ -28,13 +28,19 @@ out=$(HOME="$H" DECK_SAVES_ACCT=A RCLONE_BIN="$H/bin/rclone" bash "$ROOT"/deck-s
 line=$(grep 'compatdata' "$H/rclone-calls.log" | head -1)
 echo "  pushed compatdata: $([ -n "$line" ] && echo yes || echo no)"
 for id in 3359702471 4006258169; do
-  grep -q -- "--include=$id/pfx" <<<"$line" || fails+=("non-Steam prefix $id was not included")
+  grep -q -- "+ $id/pfx" <<<"$line" || fails+=("non-Steam prefix $id was not included")
 done
 for id in 413150 362890; do
-  grep -q -- "--include=$id/pfx" <<<"$line" && fails+=("REAL Steam game $id would be uploaded")
+  grep -q -- "+ $id/pfx" <<<"$line" && fails+=("REAL Steam game $id would be uploaded")
 done
-echo "  includes only non-Steam appids: $(grep -o -- '--include=[0-9]*' <<<"$line" | tr '\n' ' ')"
-[[ "${line%%--include*}" == *"--exclude"* ]] || fails+=("an exclude lands after the include")
+echo "  included non-Steam appids: $(grep -o -- '+ [0-9]*' <<<"$line" | tr '\n' ' ')"
+# rclone calls the order indeterminate when --include and --exclude are mixed; only --filter
+# is documented as first-match-wins, so the rules must be filters and nothing else
+grep -q -- '--include=' <<<"$line" && fails+=("still mixing --include (indeterminate order)")
+grep -q -- '--exclude=' <<<"$line" && fails+=("still mixing --exclude (indeterminate order)")
+grep -q -- '--filter - \*\*$' <<<"$line" || grep -q -- '--filter - \*\*' <<<"$line" \
+  || fails+=("no catch-all exclude: everything else would be uploaded")
+[[ "${line%%+ *}" == *"--filter - "* ]] || fails+=("an exclude rule lands after the includes")
 
 # 2. THE DANGEROUS CASE: no non-Steam prefixes at all must mean no pcsaves sync,
 #    never an unfiltered sync of every Steam game

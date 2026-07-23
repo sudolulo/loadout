@@ -23,7 +23,7 @@ CURFILE="$STATE/current-account"     # whose saves are sitting in ~/Emulation ri
 FLAGS="--transfers=8 --checkers=8 --fast-list"
 LOG="$HOME/deck-saves.log"
 declare -A SRC=( [saves]="$HOME/Emulation/saves" [storage]="$HOME/Emulation/storage" )
-declare -A EXTRA=() FIND=()
+declare -A FIND=()
 
 # --- Windows-game saves -------------------------------------------------------------------
 # Windows games run in a Proton prefix that STEAM owns, at steamapps/compatdata/<appid> -- the
@@ -35,25 +35,39 @@ declare -A EXTRA=() FIND=()
 # there are none, the key is left out entirely: an empty include list would mean "no filter",
 # which would upload every Steam game's prefix.
 CD="$HOME/.local/share/Steam/steamapps/compatdata"
-PC_INC=""; PC_FIND=""
+PC_IDS=(); PC_FIND=""
 if [ -d "$CD" ]; then
   for _d in "$CD"/*; do
     _id=${_d##*/}
     [[ "$_id" =~ ^[0-9]+$ ]] || continue
     [ "$_id" -ge 2147483648 ] 2>/dev/null || continue
-    PC_INC="$PC_INC --include=$_id/pfx/drive_c/users/steamuser/**"
+    PC_IDS+=("$_id")
     PC_FIND="$PC_FIND -o -path */$_id/pfx/drive_c/users/steamuser/*"
   done
 fi
-if [ -n "$PC_INC" ]; then
+if [ ${#PC_IDS[@]} -gt 0 ]; then
   SRC[pcsaves]="$CD"
-  # a prefix is ~1GB of Windows; only the user profile holds saves. rclone is first-match-wins,
-  # so the excludes must come BEFORE the includes.
-  EXTRA[pcsaves]="--exclude=**/AppData/Local/Temp/** --exclude=**/AppData/Local/*Cache*/** --exclude=**/AppData/LocalLow/Temp/**$PC_INC"
   # the same subtree drives the "has this Deck got unpushed progress?" check -- otherwise the
   # constant churn Windows makes inside a prefix reads as progress and jams autosync in CONFLICT
   FIND[pcsaves]="( ${PC_FIND# -o } ) -not -path */Temp/* -not -path */Cache/*"
 fi
+
+# rclone REFUSES to define an order when --include and --exclude are mixed ("the order they are
+# parsed in is indeterminate"), so the rules are expressed as --filter, which is explicitly
+# first-match-wins. Built as an ARRAY: a filter rule contains a space, which unquoted word
+# splitting would tear in half.
+rclone_filters() {
+  FILTERS=()
+  [ "$1" = pcsaves ] || return 0
+  local id
+  FILTERS+=( --filter "- **/AppData/Local/Temp/**" )
+  FILTERS+=( --filter "- **/AppData/LocalLow/Temp/**" )
+  FILTERS+=( --filter "- **/Cache/**" )
+  for id in "${PC_IDS[@]}"; do
+    FILTERS+=( --filter "+ $id/pfx/drive_c/users/steamuser/**" )
+  done
+  FILTERS+=( --filter "- **" )        # a prefix is ~1GB of Windows; nothing else goes up
+}
 
 # The signed-in account, not merely the first directory under userdata/.
 # Helpers live INSIDE the AppImage, never in $HOME -- the container deletes any copy there, so
@@ -86,7 +100,8 @@ push() {                       # push $1's saves; refuses to stamp the marker on
   local a=$1 now rc=0
   for k in "${!SRC[@]}"; do
     [ -d "${SRC[$k]}" ] || continue
-    "$RC" sync "${SRC[$k]}" "$(remote "$a")/$k" $FLAGS ${EXTRA[$k]:-} >>"$LOG" 2>&1 || rc=$?
+    rclone_filters "$k"
+    "$RC" sync "${SRC[$k]}" "$(remote "$a")/$k" $FLAGS "${FILTERS[@]}" >>"$LOG" 2>&1 || rc=$?
   done
   if [ "$rc" != 0 ]; then
     echo "ERR push failed (rclone rc=$rc) -- see $LOG; marker NOT stamped"
@@ -105,7 +120,8 @@ pull() {                       # pull $1's saves down; same no-lying-on-failure 
   for k in "${!SRC[@]}"; do
     "$RC" lsf "$(remote "$a")/$k" >/dev/null 2>&1 || continue
     mkdir -p "${SRC[$k]}"
-    "$RC" sync "$(remote "$a")/$k" "${SRC[$k]}" $FLAGS ${EXTRA[$k]:-} >>"$LOG" 2>&1 || rc=$?
+    rclone_filters "$k"
+    "$RC" sync "$(remote "$a")/$k" "${SRC[$k]}" $FLAGS "${FILTERS[@]}" >>"$LOG" 2>&1 || rc=$?
   done
   [ "$rc" != 0 ] && { echo "ERR pull failed (rclone rc=$rc) -- see $LOG"; return "$rc"; }
   t=$(nas_ts "$a")
@@ -152,7 +168,11 @@ case "${1:-status}" in
     echo "local_synced=$(local_ts "$ACCT" || echo 0)"
     echo "dirty=$(local_dirty "$ACCT" && echo 1 || echo 0)"
     echo "conflict=$( [ -f "$(conflict "$ACCT")" ] && cat "$(conflict "$ACCT")" || echo none)"
-    echo "auto=$(systemctl --user is-active deck-saves-daemon 2>/dev/null || echo unknown)"
+    # the containerised unit is loadout-saves.service; the old deck-saves-daemon name reported
+    # "inactive" forever. is-active PRINTS its answer and also exits non-zero, so the old
+    # `|| echo unknown` emitted a second bogus line on top of it.
+    _auto=$(systemctl --user is-active loadout-saves.service 2>/dev/null | head -1)
+    echo "auto=${_auto:-unknown}"
     # size only what is actually synced -- du on a whole Proton prefix would report the
     # Windows install as if it were save data
     loc=0
