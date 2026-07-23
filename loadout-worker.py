@@ -103,6 +103,57 @@ def copy_tree(src, dst, on_bytes):
     return total
 
 
+def tree_size(path):
+    """(bytes, file_count) under path — used to prove a move arrived intact."""
+    if os.path.isfile(path):
+        try:
+            return os.path.getsize(path), 1
+        except OSError:
+            return 0, 0
+    total, n = 0, 0
+    for r, _, fs in os.walk(path):
+        for f in fs:
+            try:
+                total += os.path.getsize(os.path.join(r, f))
+                n += 1
+            except OSError:
+                pass
+    return total, n
+
+
+def do_move(m, on_bytes):
+    """Relocate one game between disks, COPY -> VERIFY -> delete.
+
+    The original is deleted only after the copy is on the destination disk and measures the
+    same (bytes and file count). Anything short of that leaves both copies in place: wasting
+    disk is recoverable, a half-moved game is not. The copy lands on a `.part` name first, so
+    an interrupted move never looks like a finished game.
+    """
+    src, dst = m["from"], m["to"]
+    if not os.path.exists(src):
+        return False, "source is gone"
+    if os.path.exists(dst):
+        return False, "destination already exists"
+    want_b, want_n = tree_size(src)
+    tmp = dst + ".part"
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if os.path.isdir(src):
+        copy_tree(src, tmp, on_bytes)
+    else:
+        copy_file(src, tmp, 0, lambda d: on_bytes(d, want_b))
+    got_b, got_n = tree_size(tmp)
+    if got_b != want_b or got_n != want_n:
+        return False, ("copy mismatch: %d bytes/%d files vs %d/%d — original kept"
+                       % (got_b, got_n, want_b, want_n))
+    os.rename(tmp, dst)
+    # verified present at the destination; only now is it safe to reclaim the old copy
+    if os.path.isdir(src):
+        shutil.rmtree(src)
+    else:
+        os.remove(src)
+    return True, "%.1f MB" % (want_b / 1048576.0)
+
+
 def main():
     if not os.path.exists(QUEUE):
         return 0
@@ -113,9 +164,27 @@ def main():
         os.remove(QUEUE)
         return 1
     pulls, drops = job.get("pulls", []), job.get("drops", [])
-    log("start: %d pull(s), %d drop(s)" % (len(pulls), len(drops)))
-    grand = max(sum(p.get("size", 0) for p in pulls), 1)
+    moves = job.get("moves", [])
+    log("start: %d pull(s), %d drop(s), %d move(s)" % (len(pulls), len(drops), len(moves)))
+    grand = max(sum(p.get("size", 0) for p in pulls) + sum(m.get("size", 0) for m in moves), 1)
     moved = 0
+
+    # Moves go first: they free space on the disk a pull may be about to land on.
+    for m in moves:
+        started = time.time()
+        write_progress(state="moving", name=m["name"], done=moved, total=grand)
+
+        def on_b(b, t=m.get("size", 1) or 1, _n=m["name"], _m=moved, _s=started):
+            el = max(time.time() - _s, 0.001)
+            write_progress(state="moving", name=_n, done=_m + b, total=grand,
+                           item_done=b, item_total=t, rate=b / el)
+        try:
+            ok, detail = do_move(m, on_b)
+        except Exception as e:
+            ok, detail = False, str(e)
+        log(("moved %s to %s (%s)" if ok else "move FAILED %s -> %s: %s")
+            % (m["name"], m.get("disk", m["to"]), detail))
+        moved += m.get("size", 0)
 
     for d in drops:
         write_progress(state="freeing", name=d["name"], done=moved, total=grand)
@@ -179,14 +248,16 @@ def main():
                     log("copy INTERRUPTED %s: %s (will resume)" % (name, e))
                     write_progress(state="interrupted", name=name, done=moved, total=grand)
                     return 1
-            os.system('find %s \( -iname "*.sh" -o -iname "*.AppImage" \) '
-                      '-exec chmod +x {} + 2>/dev/null'
-                      % repr(os.path.dirname(files[0]["local"])) if files else ":")
+            if files:
+                # the read-only NAS mount strips the execute bit; restore it on what launches
+                os.system(r'find %s \( -iname "*.sh" -o -iname "*.AppImage" \) '
+                          r'-exec chmod +x {} + 2>/dev/null'
+                          % repr(os.path.dirname(files[0]["local"])))
             log("copied game %s (%.1f MB, %d file(s))" % (name, gtot / 1048576.0, len(files)))
             moved += p.get("size", 0)
             remaining = [q for q in pulls if q["name"] != name]
             try:
-                json.dump({"pulls": remaining, "drops": []}, open(QUEUE + ".tmp", "w"))
+                json.dump({"pulls": remaining, "drops": [], "moves": []}, open(QUEUE + ".tmp", "w"))
                 os.replace(QUEUE + ".tmp", QUEUE)
             except Exception:
                 pass
@@ -224,7 +295,7 @@ def main():
         # shrink the queue so a restart does not redo finished games
         remaining = [q for q in pulls if q["name"] != name]
         try:
-            json.dump({"pulls": remaining, "drops": []}, open(QUEUE + ".tmp", "w"))
+            json.dump({"pulls": remaining, "drops": [], "moves": []}, open(QUEUE + ".tmp", "w"))
             os.replace(QUEUE + ".tmp", QUEUE)
         except Exception:
             pass

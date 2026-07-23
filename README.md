@@ -19,7 +19,9 @@ bumpers jump straight between sections from anywhere. Two per-game toggles:
 - **Start — Disk** (only when an SD card is present): choose per game whether an offline copy
   lands on **SD** or **Internal**. The **Where** column shows the pick (`→ SD` / `→ Internal`)
   before Apply, and the disk a game already lives on after. Freeing removes it from wherever it
-  actually is.
+  actually is. Pressing it on a game **already on the Deck** relocates it (`Internal → SD`): the
+  copy is verified on the new disk before the old one is reclaimed, so an interrupted move never
+  loses the game. Shortcuts point through the union, so moving disks never breaks them.
 
 Only **playable** games are listed — installers (un-installed PC repacks) are hidden.
 Rescan = **⧉ View**, Apply = **Y**, Close = **B**, sidebar = **D-pad ←/→** (bumpers **L1/R1**
@@ -47,8 +49,10 @@ against a live game — reconciles Steam shortcuts with what you've enabled, dro
 and returns you to Game Mode (or restarts Steam on the desktop) exactly once.
 
 ## Saves — `deck-saves.sh`, `deck-saves-daemon.sh`, `steam-account.py`
-Emulator saves synced to the NAS under the **signed-in Steam account**, so a profile resumes on
-whichever Deck you pick up. The daemon pushes on game exit, pulls on idle when the NAS is newer,
+Game saves synced to the NAS under the **signed-in Steam account**, so a profile resumes on
+whichever Deck you pick up. Emulator saves (`~/Emulation/{saves,storage}`) plus Windows-game saves
+from inside Loadout's Proton prefixes — filtered to the user profile, so the ~1 GB Windows install
+in each prefix is never uploaded and ordinary prefix churn never reads as unsynced progress. The daemon pushes on game exit, pulls on idle when the NAS is newer,
 and hands the save tree over on a profile switch — never mid-game, never over unsynced progress.
 
 ## Wizard PC installs — `wizard/`

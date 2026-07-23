@@ -2,6 +2,24 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.13.0] - 2026-07-23
+### Added
+- **Move a game between disks.** Pressing **Start** on a game already on the Deck now relocates it
+  (`Internal → SD`) instead of doing nothing. The worker copies to the destination, verifies it
+  (bytes *and* file count) and only then reclaims the original — a failed or interrupted move
+  leaves both copies rather than half a game, and never overwrites something already there.
+  Steam is untouched by a move, because shortcuts resolve through the union.
+- **PC saves are backed up.** Windows games run in Proton prefixes under `~/.proton-prefixes`,
+  which the save sync did not know about. It now syncs the user profile inside each prefix,
+  filtered so the ~1 GB Windows install is never uploaded — and the "unsynced progress" check uses
+  the same filter, so ordinary prefix churn cannot jam autosync in a permanent CONFLICT.
+### Changed
+- **Prune empty** covers the PC union as well as the ROM systems, so leftover game folders can be
+  cleared with the same safety rules (nothing holding real content is ever removed).
+- `packaging/release.sh` is **in the repo** rather than living in a scratch directory: build →
+  launch-test the built AppImage → tag → publish, with `--dry-run`, a dirty-tree guard, and the
+  API token read from `rbw` at run time and never written into the tree.
+
 ## [0.12.0] - 2026-07-23
 ### Fixed
 - **PC games now actually reach Steam.** Ticking "show in Steam" wrote a launcher script and

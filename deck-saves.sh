@@ -1,5 +1,9 @@
 #!/bin/bash
-# Emulator saves on the NAS, filed under the Steam account that is actually signed in.
+# Game saves on the NAS, filed under the Steam account that is actually signed in.
+#
+# Covers emulator saves (~/Emulation/{saves,storage}) and the Windows-game saves inside
+# Loadout's Proton prefixes (~/.proton-prefixes/<game>/pfx/.../users/steamuser), which are
+# filtered down to the user profile so the Windows install itself is never uploaded.
 #
 # Emulators keep one save tree per Deck (~/Emulation/{saves,storage}), not one per Steam
 # profile -- so "saves follow the profile" means swapping that tree when the signed-in
@@ -18,7 +22,16 @@ STATE="$HOME/.deck-saves"; mkdir -p "$STATE"
 CURFILE="$STATE/current-account"     # whose saves are sitting in ~/Emulation right now
 FLAGS="--transfers=8 --checkers=8 --fast-list"
 LOG="$HOME/deck-saves.log"
-declare -A SRC=( [saves]="$HOME/Emulation/saves" [storage]="$HOME/Emulation/storage" )
+declare -A SRC=( [saves]="$HOME/Emulation/saves" [storage]="$HOME/Emulation/storage" \
+                 [pcsaves]="$HOME/.proton-prefixes" )
+# A Proton prefix is ~1GB of Windows system files; only the user profile inside it holds game
+# saves, so pcsaves is filtered down to that. rclone takes the FIRST matching rule, so the
+# excludes must precede the include -- and because an --include exists, everything the include
+# does not cover is excluded anyway. Same subtree is used for the "has this Deck got unpushed
+# progress?" check below, otherwise every prefix write (Windows touches them constantly) would
+# read as unsynced progress and jam autosync in permanent CONFLICT.
+declare -A EXTRA=( [pcsaves]="--exclude=**/AppData/Local/Temp/** --exclude=**/AppData/Local/*Cache*/** --exclude=**/AppData/LocalLow/Temp/** --include=*/pfx/drive_c/users/steamuser/**" )
+declare -A FIND=( [pcsaves]="-path */pfx/drive_c/users/steamuser/* -not -path */Temp/* -not -path */Cache/*" )
 
 # The signed-in account, not merely the first directory under userdata/.
 ACCT="${DECK_SAVES_ACCT:-$(python3 "$HOME/steam-account.py" 2>/dev/null)}"
@@ -36,7 +49,7 @@ newest_local() {
   local n=0 t
   for k in "${!SRC[@]}"; do
     [ -d "${SRC[$k]}" ] || continue
-    t=$(find "${SRC[$k]}" -type f -printf '%T@\n' 2>/dev/null | cut -d. -f1 | sort -rn | head -1)
+    t=$(find "${SRC[$k]}" ${FIND[$k]:-} -type f -printf '%T@\n' 2>/dev/null | cut -d. -f1 | sort -rn | head -1)
     [ -n "${t:-}" ] && [ "$t" -gt "$n" ] && n=$t
   done
   echo "$n"
@@ -48,7 +61,7 @@ push() {                       # push $1's saves; refuses to stamp the marker on
   local a=$1 now rc=0
   for k in "${!SRC[@]}"; do
     [ -d "${SRC[$k]}" ] || continue
-    "$RC" sync "${SRC[$k]}" "$(remote "$a")/$k" $FLAGS >>"$LOG" 2>&1 || rc=$?
+    "$RC" sync "${SRC[$k]}" "$(remote "$a")/$k" $FLAGS ${EXTRA[$k]:-} >>"$LOG" 2>&1 || rc=$?
   done
   if [ "$rc" != 0 ]; then
     echo "ERR push failed (rclone rc=$rc) -- see $LOG; marker NOT stamped"
@@ -67,7 +80,7 @@ pull() {                       # pull $1's saves down; same no-lying-on-failure 
   for k in "${!SRC[@]}"; do
     "$RC" lsf "$(remote "$a")/$k" >/dev/null 2>&1 || continue
     mkdir -p "${SRC[$k]}"
-    "$RC" sync "$(remote "$a")/$k" "${SRC[$k]}" $FLAGS >>"$LOG" 2>&1 || rc=$?
+    "$RC" sync "$(remote "$a")/$k" "${SRC[$k]}" $FLAGS ${EXTRA[$k]:-} >>"$LOG" 2>&1 || rc=$?
   done
   [ "$rc" != 0 ] && { echo "ERR pull failed (rclone rc=$rc) -- see $LOG"; return "$rc"; }
   t=$(nas_ts "$a")
@@ -115,7 +128,13 @@ case "${1:-status}" in
     echo "dirty=$(local_dirty "$ACCT" && echo 1 || echo 0)"
     echo "conflict=$( [ -f "$(conflict "$ACCT")" ] && cat "$(conflict "$ACCT")" || echo none)"
     echo "auto=$(systemctl --user is-active deck-saves-daemon 2>/dev/null || echo unknown)"
-    loc=0; for k in "${!SRC[@]}"; do [ -d "${SRC[$k]}" ] && loc=$((loc+$(du -sb "${SRC[$k]}" 2>/dev/null|cut -f1))); done
+    # size only what is actually synced -- du on a whole Proton prefix would report the
+    # Windows install as if it were save data
+    loc=0
+    for k in "${!SRC[@]}"; do
+      [ -d "${SRC[$k]}" ] || continue
+      loc=$((loc+$(find "${SRC[$k]}" ${FIND[$k]:-} -type f -printf '%s\n' 2>/dev/null | awk '{t+=$1} END{print t+0}')))
+    done
     echo "local_bytes=$loc"
     echo "nas_bytes=$("$RC" size "$(remote "$ACCT")" --json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("bytes",0))' 2>/dev/null || echo 0)" ;;
 esac

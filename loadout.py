@@ -256,6 +256,18 @@ def pull_dest_dir(r):
 def row_has_sd(r):
     """Is there a second disk to choose from for this row's library?"""
     return HAVE_PC_SD if getattr(r, "kind", None) == "pc" else HAVE_SD
+
+
+def dest_label(r):
+    """The disk this row is currently set to end up on ("SD"/"Internal")."""
+    return "SD" if getattr(r, "dest", "internal") == "sd" else "Internal"
+
+
+def move_staged(r):
+    """True when the row is already on the Deck but on the OTHER disk from the one chosen —
+    i.e. applying should relocate it rather than copy or free it."""
+    return bool(getattr(r, "is_local", False) and row_has_sd(r)
+                and getattr(r, "disk", "") and r.disk != dest_label(r))
 _STEAM_EXT = (".m3u", ".cue", ".gdi", ".chd", ".iso", ".nkit.iso", ".rvz", ".gcm",
               ".wbfs", ".nsp", ".xci", ".cso", ".pbp", ".gb", ".gbc", ".gba", ".nds",
               ".z64", ".sfc", ".smc", ".nes", ".md", ".sms", ".gg", ".pce")
@@ -1184,6 +1196,8 @@ class Page(Gtk.Box):
         if r.is_local:
             if not checked:
                 return "free"                          # will be removed on Apply
+            if move_staged(r):
+                return "%s → %s" % (r.disk, dest_label(r))   # relocating on Apply
             return (r.disk if row_has_sd(r) else "on Deck") or "on Deck"
         if not checked:
             return "NAS"
@@ -1270,8 +1284,8 @@ class Page(Gtk.Box):
             return
         i = int(str(self.store.get_path(sel)))
         r = self.rows[i]
-        if not row_has_sd(r) or r.is_local:
-            return                          # nothing to choose between, or it already landed
+        if not row_has_sd(r):
+            return                          # only one disk: nothing to choose between
         r.dest = "internal" if r.dest == "sd" else "sd"
         self.store[i][3] = self._where(i)
 
@@ -1286,6 +1300,10 @@ class Page(Gtk.Box):
             elif not self.store[i][0] and r.is_local:
                 drops.append(r)
         return pulls, drops
+
+    def moves_pending(self):
+        """Rows staying on the Deck but on the wrong disk — these get relocated, not recopied."""
+        return [r for i, r in enumerate(self.rows) if self.store[i][0] and move_staged(r)]
 
     def steam_pending(self):
         """(add, remove) GameRows whose Steam checkbox differs from disk"""
@@ -1346,6 +1364,9 @@ class SavesPage(Gtk.Box):
 
     def pending(self):
         return [], []
+
+    def moves_pending(self):
+        return []
 
     def steam_pending(self):
         return [], []
@@ -1601,6 +1622,9 @@ class StoragePage(Gtk.Box):
     def pending(self):
         return [], []
 
+    def moves_pending(self):
+        return []
+
     def steam_pending(self):
         return [], []
 
@@ -1773,19 +1797,26 @@ class StoragePage(Gtk.Box):
         self.rebuild()
 
     def prune(self):
-        """Delete system folders that hold no ROMs — only ES-DE/EmuDeck scaffolding. Local
-        branches only; the NAS tier is read-only and never touched."""
+        """Delete folders that hold nothing real — an ES-DE/EmuDeck system stub on the ROM side,
+        a leftover game folder on the PC side. Local branches only; the read-only NAS tiers are
+        never touched, and anything holding actual content is left alone."""
         if self.busy:
             return
         self.busy = True
-        self.prog.set_text("Scanning for empty system folders…")
+        self.prog.set_text("Scanning for empty folders…")
 
         def work():
-            gone = []
+            roms, pcs = [], []
             for b in ROM_LOCALS:
-                gone += prune_empty_systems(b, dry_run=False)
-            msg = ("Pruned %d empty system folder%s." % (len(gone), "" if len(gone) == 1 else "s")
-                   if gone else "No empty system folders to prune.")
+                roms += prune_empty_systems(b, dry_run=False)
+            for b in PC_LOCALS:
+                pcs += prune_empty_systems(b, dry_run=False)
+            bits = []
+            if roms:
+                bits.append("%d empty system folder%s" % (len(roms), "" if len(roms) == 1 else "s"))
+            if pcs:
+                bits.append("%d empty game folder%s" % (len(pcs), "" if len(pcs) == 1 else "s"))
+            msg = ("Pruned " + " and ".join(bits) + ".") if bits else "Nothing empty to prune."
             GLib.idle_add(self._done, msg)
         threading.Thread(target=work, daemon=True).start()
 
@@ -2343,20 +2374,23 @@ class App(Gtk.Window):
         return False
 
     def on_apply(self, _b):
-        pulls, drops, sadd, srem = [], [], [], []
+        pulls, drops, sadd, srem, moves = [], [], [], [], []
         for pg in self.pages:
             p, d = pg.pending()
             pulls += p; drops += d
             a, r = pg.steam_pending()
             sadd += a; srem += r
-        if not pulls and not drops and not sadd and not srem:
+            moves += pg.moves_pending()
+        if not pulls and not drops and not sadd and not srem and not moves:
             self.title.set_markup("<b>Nothing to change.</b>")
             return
         need = sum(r.size for r in pulls)
         # Space check is per destination filesystem: SD-bound and internal-bound copies can
         # land on different disks, so a single total would mis-judge either one.
         by_fs = {}
-        for r in pulls:
+        # a move needs room on the disk it is going TO, exactly like a pull does (the space it
+        # gives back on the old disk is only released afterwards, so it cannot be counted here)
+        for r in pulls + moves:
             p = pull_dest_dir(r)
             while p and not os.path.exists(p):
                 p = os.path.dirname(p)
@@ -2373,14 +2407,17 @@ class App(Gtk.Window):
                                 human(sum(free_on(p) for _, p in short))), "error")
             self.confirm = None
             return
-        self.confirm = (pulls, drops, sadd, srem)
+        self.confirm = (pulls, drops, sadd, srem, moves)
         steam_note = ""
         if sadd or srem:
             steam_note = "     Steam: +%d / -%d shortcut(s)" % (len(sadd), len(srem))
+        move_note = ""
+        if moves:
+            move_note = "     Move disk: %d (%s)" % (len(moves), human(sum(r.size for r in moves)))
         self.show_banner(
-            "Apply?   Copy to Deck: %d (%s)     Free from Deck: %d%s\n"
+            "Apply?   Copy to Deck: %d (%s)     Free from Deck: %d%s%s\n"
             "The NAS copies are not touched.        A = confirm      B = cancel"
-            % (len(pulls), human(need), len(drops), steam_note), "confirm")
+            % (len(pulls), human(need), len(drops), move_note, steam_note), "confirm")
 
     def show_banner(self, text, style):
         ctx = self.banner.get_style_context()
@@ -2401,7 +2438,7 @@ class App(Gtk.Window):
         Copying inside this process meant closing the app killed the transfer. The
         worker is a systemd user service, so you can queue a 15GB game, close this, and
         go play while it copies."""
-        pulls, drops, sadd, srem = self.confirm
+        pulls, drops, sadd, srem, moves = self.confirm
         self.hide_banner()
         # Console Steam picks are instant symlinks. PC picks are launchers, handled below.
         for r in sadd:
@@ -2436,8 +2473,32 @@ class App(Gtk.Window):
             # cartridge collection / PC game: free every local branch that holds it
             return {"name": r.name, "local": getattr(r, "local_dirs", None) or [r.local_path]}
 
+        def move_jobs(r):
+            """Relocating a game: one job per thing to move, each carrying its own from/to so
+            the worker can verify-then-delete individually."""
+            dst = pull_dest_dir(r)                 # the disk this row is now set to
+            if getattr(r, "kind", None) == "game":
+                out = []
+                for fn in r.files:                 # a game's files can be split across disks
+                    src = rom_local_path(r.system, fn)
+                    if not src or src.startswith(dst.rstrip("/") + os.sep):
+                        continue                   # missing, or already on the chosen disk
+                    try:
+                        sz = os.path.getsize(src)
+                    except OSError:
+                        sz = 0
+                    out.append({"name": "%s — %s" % (r.name, fn), "from": src,
+                                "to": os.path.join(dst, r.system, fn), "size": sz,
+                                "disk": dest_label(r)})
+                return out
+            src = (r.local_dirs or [r.local_path])[0]
+            return [{"name": r.name, "from": src,
+                     "to": os.path.join(dst, os.path.basename(src)),
+                     "size": r.size, "disk": dest_label(r)}]
+
         job = {"pulls": [pull_job(r) for r in pulls],
-               "drops": [drop_job(r) for r in drops]}
+               "drops": [drop_job(r) for r in drops],
+               "moves": [j for r in moves for j in move_jobs(r)]}
         try:
             tmp = QUEUE + ".tmp"
             json.dump(job, open(tmp, "w"))
