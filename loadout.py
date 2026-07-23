@@ -1237,7 +1237,12 @@ class App(Gtk.Window):
         self.busy = False
         self.connect("delete-event", lambda *_: (self.quit_app(), True)[1])
         self.connect("key-press-event", self.on_key)
-        self.select_nav(0)                     # show the first section (PC Games)
+        # open on the first section that actually has games (PC is often empty on a Deck)
+        _dkey = "pc"
+        if not _pc0:
+            _dkey = "collections" if _roms0 else (next(iter(self.console_pages), "pc")
+                                                  if self.console_pages else "pc")
+        self.select_nav(next((i for i, e in enumerate(self.nav) if e["key"] == _dkey), 0))
         self.reload(prescanned=(_pc0, _roms0, _by))
         self.pad = Gamepad(self)
         self.pad.start()
