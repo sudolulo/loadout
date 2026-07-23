@@ -22,9 +22,14 @@ HOME = os.path.expanduser("~")
 # match a standard EmuDeck + rclone-union layout; drop a JSON at the config path (or set
 # $OFFLINE_MANAGER_CONFIG) to point it at a different setup. Nothing else is hardcoded.
 _DEFAULTS = {
-    "rom_local":   "~/Emulation/roms-local",   # writable local ROM branch of the union
+    "rom_local":   "~/Emulation/roms-local",   # writable INTERNAL ROM branch of the union
+    "rom_sd":      "",                          # SD-card ROM branch: "" = auto-detect the
+                                                #   Deck SD, an explicit path forces it,
+                                                #   "off" disables (internal + NAS only)
     "rom_nas":     "~/.cache/nas-roms",         # read-only NAS branch (rclone mount)
     "rom_union":   "~/Emulation/roms",          # the mergerfs union ES-DE/SRM read
+    "default_target": "sd",                     # initial per-game disk when an SD exists
+                                                #   ("sd" or "internal"); overridable per game
     "pc_local":    "~/Games-local",
     "pc_nas":      "~/.cache/nas-pc",
     "pc_union":    "~/Games",
@@ -32,6 +37,9 @@ _DEFAULTS = {
     "srm_appimage": "~/Emulation/tools/Steam-ROM-Manager.AppImage",
     "saves_script": "~/deck-saves.sh",
 }
+# Values expanduser'd on load; these two are plain strings (a mode / a path-or-sentinel),
+# so leave them raw and let the resolvers below interpret them.
+_RAW_KEYS = ("default_target", "rom_sd")
 CONFIG_PATH = os.path.expanduser(
     os.environ.get("OFFLINE_MANAGER_CONFIG", "~/.config/offline-manager/config.json"))
 
@@ -43,17 +51,80 @@ def _load_config():
             cfg.update({k: v for k, v in json.load(f).items() if k in _DEFAULTS})
     except Exception:
         pass
-    return {k: os.path.expanduser(v) for k, v in cfg.items()}
+    return {k: (v if k in _RAW_KEYS else os.path.expanduser(v)) for k, v in cfg.items()}
+
+
+def _detect_sd():
+    """Best-effort Deck SD-card ROM dir: the first removable mount that already holds an
+    Emulation/roms(-local) tree. Returns "" when nothing looks like one -- the SD is
+    optional, so no match just means a two-tier (internal + NAS) library."""
+    import glob
+    for pat in ("/run/media/deck/*", "/run/media/*/*", "/run/media/*"):
+        for m in sorted(glob.glob(pat)):
+            if not os.path.isdir(m):
+                continue
+            for sub in ("Emulation/roms-local", "Emulation/roms"):
+                cand = os.path.join(m, sub)
+                if os.path.isdir(cand):
+                    return cand
+    return ""
+
+
+def _resolve_sd(raw):
+    """Config value -> the SD ROM branch to use, or "" for none.
+
+    ""/unset -> auto-detect; off/none/disabled -> disabled; else the given path. In every
+    case the branch is only used when it is a real directory, so a configured-but-unmounted
+    SD (card pulled out) degrades cleanly to internal-only."""
+    v = (raw or "").strip()
+    if v.lower() in ("off", "none", "disabled"):
+        return ""
+    path = os.path.expanduser(v) if v else _detect_sd()
+    return path if path and os.path.isdir(path) else ""
 
 
 _C = _load_config()
-ROM_LOCAL = _C["rom_local"]
+ROM_LOCAL = _C["rom_local"]                             # internal branch (always present)
+ROM_SD = _resolve_sd(_C["rom_sd"])                      # "" when there is no usable SD
 ROM_NAS = _C["rom_nas"]
+# Every writable local branch, SD first: SD is the natural home for bulky copies and the
+# branch a shared file is reported from. With no SD this is just [internal] and every path
+# below reduces to the original two-tier behaviour.
+ROM_LOCALS = [b for b in (ROM_SD, ROM_LOCAL) if b]
+HAVE_SD = bool(ROM_SD)                                  # is there a per-game disk choice at all?
+DISK_LABEL = {ROM_LOCAL: "Internal"}
+if ROM_SD:
+    DISK_LABEL[ROM_SD] = "SD"
+# Sticky initial per-game destination; collapses to internal when there is no SD.
+DEFAULT_DEST = "sd" if (ROM_SD and str(_C["default_target"]).strip().lower() != "internal") \
+    else "internal"
 PC_LOCAL = _C["pc_local"]
 PC_NAS = _C["pc_nas"]
 PC_MANIFEST = _C["pc_manifest"]
 SF_DIR = os.path.join(ROM_LOCAL, ".steam-shortcuts")   # deck-writable Steam pick set
 ROM_UNION = _C["rom_union"]
+ROM_TARGET = ROM_SD if DEFAULT_DEST == "sd" else ROM_LOCAL   # filesystem the disk gauge tracks
+
+
+def dest_dir(dest):
+    """The branch dir a per-game destination choice ("sd"/"internal") maps to."""
+    return ROM_SD if (dest == "sd" and ROM_SD) else ROM_LOCAL
+
+
+def rom_local_path(system, fn=""):
+    """The branch path actually holding system[/fn] (SD first), or None if not local."""
+    for b in ROM_LOCALS:
+        p = os.path.join(b, system, fn) if fn else os.path.join(b, system)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def pull_dest_dir(r):
+    """The branch dir a pull of row `r` copies into: its chosen disk (PC is internal-only)."""
+    if getattr(r, "kind", None) == "pc":
+        return PC_LOCAL
+    return dest_dir(getattr(r, "dest", DEFAULT_DEST))
 _STEAM_EXT = (".m3u", ".cue", ".gdi", ".chd", ".iso", ".nkit.iso", ".rvz", ".gcm",
               ".wbfs", ".nsp", ".xci", ".cso", ".pbp", ".gb", ".gbc", ".gba", ".nds",
               ".z64", ".sfc", ".smc", ".nes", ".md", ".sms", ".gg", ".pce")
@@ -123,13 +194,29 @@ def human(n):
     return "%.1f PB" % n
 
 
-def free_bytes():
-    st = os.statvfs(HOME)
+def _statvfs_of(path):
+    """statvfs of the filesystem holding `path`, walking up to the nearest existing parent
+    (a copy target dir may not exist yet)."""
+    p = path
+    while p and not os.path.exists(p):
+        p = os.path.dirname(p)
+    return os.statvfs(p or "/")
+
+
+def free_on(path):
+    st = _statvfs_of(path)
     return st.f_bavail * st.f_frsize
 
 
+def free_bytes():
+    # The disk gauge tracks the default copy-target filesystem (SD when present, else
+    # internal). A single Apply spanning both disks makes the gauge an estimate; the hard
+    # space check in on_apply is per-destination-filesystem and exact.
+    return free_on(ROM_TARGET)
+
+
 def total_bytes():
-    st = os.statvfs(HOME)
+    st = _statvfs_of(ROM_TARGET)
     return st.f_blocks * st.f_frsize
 
 
@@ -179,10 +266,11 @@ class Gamepad(threading.Thread):
         GLib.idle_add(self.app.set_pad_status,
                       "gamepad: " + ", ".join(d.name for d in self.devs))
         # xpad maps X to BTN_NORTH(307) and Y to BTN_WEST(308).
-        # Start is deliberately NOT bound: Apply copies and deletes, so it should never
-        # be one stray button press away.
+        # Start toggles the highlighted game's copy disk (SD/Internal) -- safe to bind
+        # because it only stages a choice; nothing copies or deletes until Apply (Y) is
+        # confirmed. Apply itself stays on Y so it is never one stray press away.
         BTN = {e.BTN_SOUTH: "a", e.BTN_EAST: "b", e.BTN_NORTH: "x", e.BTN_WEST: "y",
-               e.BTN_TL: "l1", e.BTN_TR: "r1", e.BTN_SELECT: "select"}
+               e.BTN_TL: "l1", e.BTN_TR: "r1", e.BTN_SELECT: "select", e.BTN_START: "start"}
         sel = selectors.DefaultSelector()
         for d in self.devs:
             sel.register(d, selectors.EVENT_READ)
@@ -210,15 +298,24 @@ SCAFFOLD = ("media", "gamelist.xml", "metadata.txt", "systeminfo.txt", "desktop.
 NONGAME = ("desktop", "emulators", "tools", "ps4", "custom-collections")
 
 
+def is_update_dlc(system):
+    """Updates and DLC are never managed on their own: a game update / add-on is only
+    useful with its base game, so it should live wherever that game lives (offline or on
+    the NAS), not be independently toggled. Any '*-updates' / '*-dlc' system is hidden."""
+    n = system.lower()
+    return "update" in n or "dlc" in n
+
+
 def system_stats(system):
     """(size, is_local, n_files) for a cartridge system, counting only ROM content.
 
-    Both union branches are scanned; a file counts as local when it is present in the
-    local branch. media/gamelist scaffolding is ignored so an ES-DE stub dir does not
-    read as a pulled system."""
-    ldir, ndir = os.path.join(ROM_LOCAL, system), os.path.join(ROM_NAS, system)
+    Every union branch is scanned; a file counts as local when it is present in any local
+    branch (internal or SD). media/gamelist scaffolding is ignored so an ES-DE stub dir
+    does not read as a pulled system."""
     info = {}
-    for base, isloc in ((ndir, False), (ldir, True)):
+    bases = [(os.path.join(ROM_NAS, system), False)]
+    bases += [(os.path.join(b, system), True) for b in ROM_LOCALS]
+    for base, isloc in bases:
         if not os.path.isdir(base):
             continue
         for r, ds, fs in os.walk(base):
@@ -247,16 +344,27 @@ class Row:
     def __init__(self, kind, name):
         self.kind = kind                       # "pc" or "roms"
         self.name = name
-        base_l, base_n = (PC_LOCAL, PC_NAS) if kind == "pc" else (ROM_LOCAL, ROM_NAS)
-        self.local_path = os.path.join(base_l, name)
-        self.nas_path = os.path.join(base_n, name)
+        self.dest = DEFAULT_DEST               # chosen destination for a pull
         if kind == "roms":
+            self.nas_path = os.path.join(ROM_NAS, name)
+            # a cartridge collection can span internal + SD; track every branch dir that
+            # holds it so a free clears them all, and label the disk it currently lives on.
+            holding = [b for b in ROM_LOCALS if os.path.isdir(os.path.join(b, name))]
+            self.local_dirs = [os.path.join(b, name) for b in holding]
+            self.local_path = self.local_dirs[0] if self.local_dirs \
+                else os.path.join(dest_dir(self.dest), name)
+            self.disk = DISK_LABEL.get(holding[0], "") if holding else ""
             self.size, self.is_local, self.n_files = system_stats(name)
             # a whole-console collection: name it properly and say how many games it holds
             self.label = "%s  —  %s games" % (
                 CART_NAME.get(name, name.replace("-", " ").title()), format(self.n_files, ","))
         else:
+            self.dest = "internal"             # PC games stay on internal storage
+            self.local_path = os.path.join(PC_LOCAL, name)
+            self.nas_path = os.path.join(PC_NAS, name)
             self.is_local = os.path.exists(self.local_path)
+            self.local_dirs = [self.local_path] if self.is_local else []
+            self.disk = "Internal" if self.is_local else ""
             src = self.local_path if self.is_local else self.nas_path
             self.size = du(src) if os.path.isdir(src) else (
                 os.path.getsize(src) if os.path.exists(src) else 0)
@@ -271,17 +379,17 @@ import re as _re
 
 # Consoles with big per-file games -- worth choosing individually. Everything else is a
 # cartridge system with thousands of tiny ROMs, kept as a single all-or-nothing row.
-LARGE = ("gc", "wii", "wiiu", "switch", "switch-updates", "ps2", "psp", "psx", "saturn",
+LARGE = ("gc", "wii", "wiiu", "switch", "ps2", "psp", "psx", "saturn",
          "dreamcast", "xbox", "segacd", "n3ds", "ps3", "ps4")
 # Consoles whose games are a DIRECTORY (a decrypted PS3 disc folder, a PS4 pkg set),
 # not one file -- enumerated dir-by-dir instead of file-by-file.
 FOLDER_CONSOLES = ("ps3", "ps4", "psvita", "xbox360")
 SYS_SHORT = {"gc": "GC", "wii": "Wii", "wiiu": "WiiU", "switch": "Switch",
-             "switch-updates": "Switch-Upd", "ps2": "PS2", "psp": "PSP", "psx": "PS1",
+             "ps2": "PS2", "psp": "PSP", "psx": "PS1",
              "saturn": "Saturn", "dreamcast": "DC", "xbox": "Xbox", "segacd": "SegaCD",
              "n3ds": "3DS"}
 TAB_NAME = {"gc": "GameCube", "wii": "Wii", "wiiu": "Wii U", "switch": "Switch",
-            "switch-updates": "Switch Upd", "psx": "PS1", "ps2": "PS2", "psp": "PSP",
+            "psx": "PS1", "ps2": "PS2", "psp": "PSP",
             "saturn": "Saturn", "dreamcast": "Dreamcast", "xbox": "Xbox", "n3ds": "3DS",
             "segacd": "Sega CD", "ps3": "PS3", "ps4": "PS4"}
 # Friendly names for the whole-console ROM collections shown on the Collections tab.
@@ -293,7 +401,7 @@ CART_NAME = {"snes": "Super Nintendo", "nes": "NES", "n64": "Nintendo 64",
              "neogeo": "Neo Geo", "atari2600": "Atari 2600", "wonderswan": "WonderSwan",
              "famicom": "Famicom", "sfc": "Super Famicom", "virtualboy": "Virtual Boy",
              "pokemini": "Pokémon Mini", "ngp": "Neo Geo Pocket", "vectrex": "Vectrex"}
-TAB_ORDER = ["gc", "wii", "wiiu", "switch", "switch-updates", "n3ds",
+TAB_ORDER = ["gc", "wii", "wiiu", "switch", "n3ds",
              "psx", "ps2", "psp", "ps3", "ps4", "saturn", "dreamcast", "segacd", "xbox"]
 _DISC = _re.compile(r"\s*\((?:Disc|CD|Track)\s*\d+\)", _re.I)
 
@@ -306,7 +414,7 @@ def game_key(fn):
 
 class GameRow:
     """one individual title within a large console (may be several files)"""
-    def __init__(self, system, game, files, size, is_local):
+    def __init__(self, system, game, files, size, locs):
         self.kind = "game"
         self.system = system
         self.game = game
@@ -315,19 +423,33 @@ class GameRow:
         self.label = _re.sub(r"\.(ps3|ps4|psvita)$", "", game, flags=_re.I)
         self.files = files                     # filenames within the system dir
         self.size = size
-        self.is_local = is_local
-        self.local_path = os.path.join(ROM_LOCAL, system)
+        # {filename: the local branch dir that actually holds it, or None}. The game is
+        # local only when every one of its files is present in some local branch.
+        self.local_files = dict(locs)
+        self.is_local = bool(files) and all(self.local_files.get(fn) for fn in files)
+        # the disk this game lives on (SD/Internal label), or "" when not local
+        self.disk = DISK_LABEL.get(self.local_files.get(files[0]) if files else None, "")
+        self.dest = DEFAULT_DEST               # chosen destination for a pull (user-overridable)
+        # the system dir on some branch (its actual home if local, else the pull target); the
+        # live copy/free paths come from local_files / pull_dest_dir, this is a sane fallback.
+        self.local_path = rom_local_path(system) or os.path.join(dest_dir(self.dest), system)
         self.sfile = steam_file(files)
         self.is_steam = os.path.lexists(os.path.join(SF_DIR, system, self.sfile))
 
 
-def enumerate_folder_games(system, ldir, ndir):
+def _local_bases(system):
+    """(base_dir, holding_branch_or_None) for the NAS branch then every local branch."""
+    return [(os.path.join(ROM_NAS, system), None)] + \
+           [(os.path.join(b, system), b) for b in ROM_LOCALS]
+
+
+def enumerate_folder_games(system):
     """PS3/PS4 etc.: each PLAYABLE game is a directory named `<title>.<system>` (a decrypted
     PS3 disc folder / an extracted PS4 game). Raw pkg/rar source dirs left in the console
     folder are NOT playable and are skipped -- you only see the finished game."""
     ext = "." + system                     # .ps3 / .ps4 / .psvita
     info = {}
-    for base, islocal in ((ndir, False), (ldir, True)):
+    for base, loc in _local_bases(system):
         if not os.path.isdir(base):
             continue
         for dn in os.listdir(base):
@@ -336,20 +458,19 @@ def enumerate_folder_games(system, ldir, ndir):
             p = os.path.join(base, dn)
             if not os.path.isdir(p) or not dn.lower().endswith(ext):
                 continue                   # skip pkg/rar source dirs -- only extracted games
-            d = info.setdefault(dn, {"size": 0, "local": False})
+            d = info.setdefault(dn, {"size": 0, "loc": None})
             d["size"] = max(d["size"], du(p))
-            if islocal:
-                d["local"] = True
-    return [GameRow(system, dn, [dn], d["size"], [dn] if d["local"] else False)
+            if loc and d["loc"] is None:
+                d["loc"] = loc             # SD scanned first, so SD wins when on both
+    return [GameRow(system, dn, [dn], d["size"], {dn: d["loc"]})
             for dn, d in sorted(info.items())]
 
 
 def enumerate_games(system):
-    ldir, ndir = os.path.join(ROM_LOCAL, system), os.path.join(ROM_NAS, system)
     if system in FOLDER_CONSOLES:
-        return enumerate_folder_games(system, ldir, ndir)
+        return enumerate_folder_games(system)
     info = {}
-    for base, islocal in ((ndir, False), (ldir, True)):
+    for base, loc in _local_bases(system):
         if not os.path.isdir(base):
             continue
         for fn in os.listdir(base):
@@ -362,20 +483,19 @@ def enumerate_games(system):
                 sz = os.path.getsize(p)
             except OSError:
                 sz = 0
-            d = info.setdefault(fn, {"size": 0, "local": False})
+            d = info.setdefault(fn, {"size": 0, "loc": None})
             d["size"] = max(d["size"], sz)
-            if islocal:
-                d["local"] = True
+            if loc and d["loc"] is None:
+                d["loc"] = loc
     groups = {}
     for fn, d in info.items():
-        g = groups.setdefault(game_key(fn), {"files": [], "size": 0, "nloc": 0})
+        g = groups.setdefault(game_key(fn), {"files": [], "size": 0, "locs": {}})
         g["files"].append(fn)
         g["size"] += d["size"]
-        g["nloc"] += 1 if d["local"] else 0
+        g["locs"][fn] = d["loc"]
     rows = []
     for game, g in sorted(groups.items()):
-        rows.append(GameRow(system, game, g["files"], g["size"],
-                            g["nloc"] == len(g["files"]) and g["files"]))
+        rows.append(GameRow(system, game, g["files"], g["size"], g["locs"]))
     return rows
 
 
@@ -388,7 +508,7 @@ def sweep_partials():
     if os.path.exists(QUEUE):
         return 0          # a job is pending; its .part files are resume data, not junk
     freed = 0
-    for base in (PC_LOCAL, ROM_LOCAL):
+    for base in (PC_LOCAL, *ROM_LOCALS):
         if not os.path.isdir(base):
             continue
         for n in os.listdir(base):
@@ -431,16 +551,20 @@ def scan():
             seen.add(n)
             pc.append(Row("pc", n))
     sseen, games = set(), []
-    for base in (ROM_NAS, ROM_LOCAL):
+    for base in (ROM_NAS, *ROM_LOCALS):
         if not os.path.isdir(base):
             continue
         for name in sorted(os.listdir(base)):
             p = os.path.join(base, name)
-            if name.startswith(".") or name in sseen or not os.path.isdir(p):
+            # "_"-prefixed dirs are the ROM sorter's non-console buckets (e.g. _unsorted --
+            # a catch-all for ROMs it couldn't file); never manage those as a system.
+            if name.startswith((".", "_")) or name in sseen or not os.path.isdir(p):
                 continue
             if not [f for f in os.listdir(p) if not f.startswith(".") and f not in SKIP]:
                 continue
             sseen.add(name)
+            if is_update_dlc(name):
+                continue                               # updates/DLC follow their base game
             if name in LARGE:
                 games.extend(enumerate_games(name))    # individual titles
             else:
@@ -609,19 +733,41 @@ class Page(Gtk.Box):
         self.pack_start(self.empty, False, False, 8)
         self.rows = []
 
+    def _where(self, i):
+        """The 'Where' cell: where this game is / is going, given its checkbox + chosen disk.
+
+        With an SD present the destination of a queued pull is shown (→ SD / → Internal) so
+        the per-game disk choice is visible; a two-tier library keeps the plain on-Deck/NAS
+        wording."""
+        r = self.rows[i]
+        checked = self.store[i][0]
+        pc = getattr(r, "kind", None) == "pc"
+        if r.is_local:
+            if not checked:
+                return "free"                          # will be removed on Apply
+            return (r.disk if HAVE_SD else "on Deck") or "on Deck"
+        if not checked:
+            return "NAS"
+        if HAVE_SD and not pc:                          # a queued pull with a disk choice
+            return "→ " + ("SD" if r.dest == "sd" else "Internal")
+        return "→ Deck"
+
     def load(self, rows):
         self.rows = rows
         self.store.clear()
         for r in rows:
             self.store.append([r.is_local, getattr(r, "is_steam", False),
-                               getattr(r, "label", r.name),
-                               "on Deck" if r.is_local else "NAS", human(r.size), r])
+                               getattr(r, "label", r.name), "", human(r.size), r])
+        for i in range(len(rows)):
+            self.store[i][3] = self._where(i)
         self.empty.set_visible(not rows)
         if rows:
             self.view.set_cursor(0)
 
     def on_toggled(self, _c, path):
-        self.store[path][0] = not self.store[path][0]
+        i = int(str(path))
+        self.store[i][0] = not self.store[i][0]
+        self.store[i][3] = self._where(i)
         self.app.update_totals()
 
     def on_steam_toggled(self, _c, path):
@@ -632,14 +778,34 @@ class Page(Gtk.Box):
 
     def toggle_at(self, path, col):
         col = col if (col == 0 or self.steam_col) else 0
-        self.store[path][col] = not self.store[path][col]
+        i = int(str(path))
+        self.store[i][col] = not self.store[i][col]
         if col == 0:
+            self.store[i][3] = self._where(i)
             self.app.update_totals()
 
     def toggle_current(self, col=0):
         sel = self.view.get_selection().get_selected()[1]
         if sel is not None:
             self.toggle_at(self.store.get_path(sel), col)
+
+    def cycle_dest_current(self):
+        """Flip the highlighted game's copy destination between SD and Internal.
+
+        Only queued pulls of an SD-capable library can be steered -- PC games are
+        internal-only, and a game already on the Deck keeps its disk (moving it between
+        disks is a separate operation)."""
+        if not HAVE_SD or self.view is None:
+            return
+        sel = self.view.get_selection().get_selected()[1]
+        if sel is None:
+            return
+        i = int(str(self.store.get_path(sel)))
+        r = self.rows[i]
+        if getattr(r, "kind", None) == "pc" or r.is_local:
+            return
+        r.dest = "internal" if r.dest == "sd" else "sd"
+        self.store[i][3] = self._where(i)
 
     def selected_bytes(self):
         return sum(r.size for i, r in enumerate(self.rows) if self.store[i][0])
@@ -865,8 +1031,9 @@ class App(Gtk.Window):
         outer.pack_start(bar, False, False, 0)
 
         hint = Gtk.Label(xalign=0)
+        _disk = "    •    Start = disk (SD/Internal)" if HAVE_SD else ""
         hint.set_text("D-pad = move / switch tab    •    A = keep Offline    •    "
-                      "X = show in Steam    •    Y = apply    •    B = close")
+                      "X = show in Steam" + _disk + "    •    Y = apply    •    B = close")
         hint.get_style_context().add_class("hint")
         outer.pack_start(hint, False, False, 0)
 
@@ -952,6 +1119,19 @@ class App(Gtk.Window):
             self.nb.next_page(); self._grab()
         elif name == "select":
             self.reload()
+        elif name == "start":
+            self.cycle_dest()
+        return False
+
+    def cycle_dest(self):
+        """Start / D: flip the highlighted game's copy destination (SD <-> Internal).
+
+        No-op without an SD, on the Saves tab, or on an already-local game."""
+        pg = self.page()
+        if getattr(pg, "is_saves", False) or not hasattr(pg, "cycle_dest_current"):
+            return False
+        pg.cycle_dest_current()
+        self.update_totals()
         return False
 
     def toggle_steam_current(self):
@@ -964,14 +1144,15 @@ class App(Gtk.Window):
 
     def update_focus_hint(self):
         pg = self.page()
+        disk = "    •    Start = copy to SD / Internal" if HAVE_SD else ""
         if getattr(pg, "steam_col", False):
             self.focus_label.set_text(
-                "A = keep this game Offline    •    X = show it in Steam    "
+                "A = keep this game Offline    •    X = show it in Steam" + disk + "    "
                 "(only Steam changes restart Steam at Apply)")
         elif getattr(pg, "is_saves", False):
             self.focus_label.set_text("A = run the highlighted backup / restore")
         else:
-            self.focus_label.set_text("A = keep this collection Offline")
+            self.focus_label.set_text("A = keep this collection Offline" + disk)
 
     def page(self):
         return self.nb.get_nth_page(self.nb.get_current_page())
@@ -1064,6 +1245,8 @@ class App(Gtk.Window):
             self.on_apply(None); return True
         if k in ("x", "X"):
             self.toggle_steam_current(); return True
+        if k in ("d", "D"):
+            self.cycle_dest(); return True
         if k in ("F5",):
             self.reload(); return True
         if k in ("Escape", "b", "B"):
@@ -1090,9 +1273,24 @@ class App(Gtk.Window):
             self.title.set_markup("<b>Nothing to change.</b>")
             return
         need = sum(r.size for r in pulls)
-        if need > free_bytes():
+        # Space check is per destination filesystem: SD-bound and internal-bound copies can
+        # land on different disks, so a single total would mis-judge either one.
+        by_fs = {}
+        for r in pulls:
+            p = pull_dest_dir(r)
+            while p and not os.path.exists(p):
+                p = os.path.dirname(p)
+            try:
+                dev = os.stat(p or "/").st_dev
+            except OSError:
+                dev = 0
+            slot = by_fs.setdefault(dev, [0, p or "/"])
+            slot[0] += r.size
+        short = [(n, p) for n, p in by_fs.values() if n > free_on(p)]
+        if short:
             self.show_banner("Not enough space — need %s, only %s free.    B = dismiss"
-                             % (human(need), human(free_bytes())), "error")
+                             % (human(sum(n for n, _ in short)),
+                                human(sum(free_on(p) for _, p in short))), "error")
             self.confirm = None
             return
         self.confirm = (pulls, drops, sadd, srem)
@@ -1139,18 +1337,23 @@ class App(Gtk.Window):
                     pass
 
         def pull_job(r):
+            dst = pull_dest_dir(r)             # the chosen disk (SD/Internal), or PC internal
             if getattr(r, "kind", None) == "game":
                 return {"name": r.name, "kind": "game", "system": r.system, "size": r.size,
                         "files": [{"nas": os.path.join(ROM_NAS, r.system, fn),
-                                   "local": os.path.join(ROM_LOCAL, r.system, fn)}
+                                   "local": os.path.join(dst, r.system, fn)}
                                   for fn in r.files]}
-            return {"name": r.name, "nas": r.nas_path, "local": r.local_path, "size": r.size}
+            return {"name": r.name, "nas": r.nas_path,
+                    "local": os.path.join(dst, r.name), "size": r.size}
 
         def drop_job(r):
             if getattr(r, "kind", None) == "game":
+                # free each file from the branch that actually holds it (SD or internal)
+                files = [rom_local_path(r.system, fn) for fn in r.files]
                 return {"name": r.name, "kind": "game", "system": r.system,
-                        "files": [os.path.join(ROM_LOCAL, r.system, fn) for fn in r.files]}
-            return {"name": r.name, "local": r.local_path}
+                        "files": [p for p in files if p]}
+            # cartridge collection / PC game: free every local branch that holds it
+            return {"name": r.name, "local": getattr(r, "local_dirs", None) or [r.local_path]}
 
         job = {"pulls": [pull_job(r) for r in pulls],
                "drops": [drop_job(r) for r in drops]}

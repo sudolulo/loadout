@@ -121,16 +121,25 @@ def main():
         write_progress(state="freeing", name=d["name"], done=moved, total=grand)
         try:
             if d.get("kind") == "game":
-                sysdir = None
+                # a game's files can span the internal and SD branches; remove each and
+                # tidy up every system dir it leaves empty.
+                sysdirs = set()
                 for fp in d.get("files", []):
-                    sysdir = os.path.dirname(fp)
+                    sysdirs.add(os.path.dirname(fp))
                     if os.path.exists(fp):
                         os.remove(fp)
-                if sysdir and os.path.isdir(sysdir) and not os.listdir(sysdir):
-                    os.rmdir(sysdir)          # system dir emptied -> remove it
+                for sd in sysdirs:
+                    if os.path.isdir(sd) and not os.listdir(sd):
+                        os.rmdir(sd)          # system dir emptied -> remove it
             else:
-                path = d["local"]
-                shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+                # `local` is a list of the branch dirs (internal/SD) that hold this title;
+                # accept a bare string too for older queues.
+                loc = d["local"]
+                for path in (loc if isinstance(loc, list) else [loc]):
+                    if os.path.isdir(path):
+                        shutil.rmtree(path)
+                    elif os.path.exists(path):
+                        os.remove(path)
             log("freed %s" % d["name"])
         except Exception as e:
             log("free FAILED %s: %s" % (d["name"], e))
