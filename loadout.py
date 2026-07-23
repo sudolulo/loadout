@@ -904,9 +904,10 @@ def system_stats(system):
 
 
 class Row:
-    def __init__(self, kind, name):
+    def __init__(self, kind, name, playable=True):
         self.kind = kind                       # "pc" or "roms"
         self.name = name
+        self.playable = playable               # False = present but not installed yet
         self.dest = DEFAULT_DEST               # chosen destination for a pull
         if kind == "roms":
             self.nas_path = os.path.join(ROM_NAS, name)
@@ -936,7 +937,7 @@ class Row:
             self.size = du(src) if os.path.isdir(src) else (
                 os.path.getsize(src) if os.path.exists(src) else 0)
             self.n_files = 1
-            self.label = name
+            self.label = name if self.playable else name + "        — not installed"
             # a PC game "shows in Steam" when its generated launcher exists
             if kind == "pc":
                 self.is_steam = os.path.exists(pc_pick(name))
@@ -1121,12 +1122,14 @@ def scan():
                 continue
             if not os.path.isdir(os.path.join(base, n)):
                 continue
-            if n in manifest_denies:         # the manifest knows it is not runnable yet
-                continue
-            if n not in manifest_says and not detect_entry(os.path.join(base, n)):
-                continue                     # nothing in the folder can be run
+            runnable = (n in manifest_says) and not (n in manifest_denies)
+            if not runnable and n not in manifest_denies:
+                runnable = bool(detect_entry(os.path.join(base, n)))
             seen.add(n)
-            pc.append(Row("pc", n))
+            # A repack that has not been built yet is SHOWN, not hidden: otherwise a game you
+            # know you have simply is not there, and "missing" looks identical to "not built".
+            # It cannot be ticked -- installing is the game farm's job, upstream on the NAS.
+            pc.append(Row("pc", n, playable=runnable))
     sseen, games = set(), []
     # only include the (networked) NAS branch if it responds; a wedged rclone mount would otherwise
     # HANG os.listdir and freeze the whole launch. Local branches are always scanned.
@@ -1359,6 +1362,8 @@ class Page(Gtk.Box):
         wording."""
         r = self.rows[i]
         checked = self.store[i][0]
+        if not getattr(r, "playable", True):
+            return "not built"                          # the farm installs it, not this app
         if r.is_local:
             if not checked:
                 return "free"                          # will be removed on Apply
@@ -1412,13 +1417,27 @@ class Page(Gtk.Box):
             self.store[i][6] = pb
         return False
 
+    def _blocked(self, i):
+        """A game that has not been built yet cannot be picked -- there is nothing to copy and
+        nothing Steam could launch. Say so rather than letting the tick silently do nothing."""
+        if getattr(self.rows[i], "playable", True):
+            return False
+        self.app.show_banner(
+            "%s is not installed yet — the game farm builds repacks on the NAS.    B = dismiss"
+            % self.rows[i].name, "error")
+        return True
+
     def on_toggled(self, _c, path):
         i = int(str(path))
+        if self._blocked(i):
+            return
         self.store[i][0] = not self.store[i][0]
         self.store[i][3] = self._where(i)
         self.app.update_totals()
 
     def on_steam_toggled(self, _c, path):
+        if self._blocked(int(str(path))):
+            return
         self.store[path][1] = not self.store[path][1]
 
     def on_activate(self, _v, path, _c):
@@ -1461,6 +1480,8 @@ class Page(Gtk.Box):
     def pending(self):
         pulls, drops = [], []
         for i, r in enumerate(self.rows):
+            if not getattr(r, "playable", True):
+                continue                       # nothing to copy: it has not been built
             if self.store[i][0] and not r.is_local:
                 pulls.append(r)
             elif not self.store[i][0] and r.is_local:
@@ -1477,6 +1498,8 @@ class Page(Gtk.Box):
         if not self.steam_col:
             return add, rem
         for i, r in enumerate(self.rows):
+            if not getattr(r, "playable", True):
+                continue
             want = self.store[i][1]
             if want and not r.is_steam:
                 add.append(r)

@@ -52,20 +52,24 @@ for name in ("FitGirl Repack", "Mystery", "Repack B", "Repack C"):
     print("  %-16s -> %s (must be nothing)" % (name, e or "(nothing)"))
     if e: fails.append("%s: would launch %r" % (name, e))
 
-# and the list the app actually shows
-rows = [r.name for r in L.scan()[0]]
-print("  PC page lists: %s" % sorted(rows))
+# the app SHOWS everything it can see, marking what has not been built yet
+rows = {r.name: r.playable for r in L.scan()[0]}
+print("  playable: %s" % sorted(n for n, p in rows.items() if p))
+print("  shown but not built: %s" % sorted(n for n, p in rows.items() if not p))
 for want in ("Celeste", "Spider-Man", "Morrowind", "Portal 2"):
-    if want not in rows: fails.append("%s missing from the PC page" % want)
-for no in ("FitGirl Repack", "Mystery", "Repack B", "Repack C"):
-    if no in rows: fails.append("%s should not be listed" % no)
+    if not rows.get(want): fails.append("%s should be playable" % want)
+for no in ("FitGirl Repack", "Repack B", "Repack C", "Mystery"):
+    if no not in rows: fails.append("%s vanished instead of being shown as not built" % no)
+    elif rows.get(no): fails.append("%s marked playable" % no)
 
 # a manifest that says "not runnable yet" still wins over detection
 json.dump({"Celeste": {"kind": "wizard", "entry": "setup.exe"}}, open(G + "/PC/.manifest.json", "w"))
 import importlib; importlib.reload(L)
-rows2 = [r.name for r in L.scan()[0]]
-print("  with manifest marking Celeste as a wizard: %s" % sorted(rows2))
-if "Celeste" in rows2: fails.append("manifest 'wizard' verdict was ignored")
+rows2 = {r.name: r.playable for r in L.scan()[0]}
+print("  manifest marks Celeste a wizard -> playable=%s (shown=%s)"
+      % (rows2.get("Celeste"), "Celeste" in rows2))
+if rows2.get("Celeste"): fails.append("manifest 'wizard' verdict was ignored")
+if "Celeste" not in rows2: fails.append("Celeste hidden instead of shown as not built")
 
 shutil.rmtree(root, ignore_errors=True)
 print("FAIL: " + "; ".join(fails) if fails else "PASS")

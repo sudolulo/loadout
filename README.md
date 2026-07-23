@@ -61,9 +61,13 @@ filtered to the user profile, so the ~1 GB Windows install in each prefix is nev
 ordinary prefix churn never reads as unsynced progress. Real Steam games are Steam Cloud's job. The daemon pushes on game exit, pulls on idle when the NAS is newer,
 and hands the save tree over on a profile switch — never mid-game, never over unsynced progress.
 
-## Wizard PC installs — `wizard/`
-Headless install of FitGirl/Inno "wizard" PC repacks under Wine: GUI-drive + a redist
-interception proxy, emitting a Proton-wrapped launcher for the installed Windows game.
+## PC installs are the game farm's job — not Loadout's
+Turning a FitGirl/Inno repack into a playable game happens **upstream, on the NAS**
+(`flan/game-farm`, `code/wizard`), where the release already lives and the CPU is. A Deck would
+otherwise pull tens of GB of archives over WiFi, decompress them on a handheld, and repeat the
+whole thing per Deck for a byte-identical result. Loadout **consumes** installed games: it decides
+which live on this Deck, puts them in Steam, and syncs their saves. An un-installed repack is
+shown as **not installed** rather than hidden, so you can tell "missing" from "not built yet".
 
 ## Install — the AppImage is a self-contained container
 Loadout ships as a **self-updating AppImage** (`Loadout-x86_64.AppImage`). Drop it in
