@@ -22,7 +22,8 @@ import json, os, glob
 CFG = os.path.expanduser(os.environ.get("LOADOUT_CONFIG",
                                         "~/.config/loadout/config.json"))
 D = {"rom_local": "~/Emulation/roms-local", "rom_sd": "",
-     "rom_nas": "~/.cache/nas-roms", "rom_union": "~/Emulation/roms"}
+     "rom_nas": "~/.cache/nas-roms", "rom_union": "~/Emulation/roms",
+     "rom_rclone_remote": ""}
 c = dict(D)
 try:
     c.update({k: v for k, v in json.load(open(CFG)).items() if k in D})
@@ -58,11 +59,14 @@ print("LOCAL=%s" % q(os.path.expanduser(c["rom_local"])))
 print("SD=%s" % q(sd))
 print("NAS=%s" % q(os.path.expanduser(c["rom_nas"])))
 print("UNION=%s" % q(os.path.expanduser(c["rom_union"])))
+print("REMOTE_CFG=%s" % q(c.get("rom_rclone_remote", "")))
 PY
 )"
 
 # --- NAS tier: on unless disabled or rclone/remote missing ---------------------------------
-REMOTE="${ROM_RCLONE_REMOTE:-games:roms}"
+# precedence: config's rom_rclone_remote (set by the in-app SMB setup) > $ROM_RCLONE_REMOTE env
+# > the legacy games:roms default. Empty everywhere => local-only union.
+REMOTE="${REMOTE_CFG:-${ROM_RCLONE_REMOTE:-games:roms}}"
 RCLONE="$HOME/bin/rclone"; [ -x "$RCLONE" ] || RCLONE="$(command -v rclone || true)"
 NAS_ON=1
 { [ -z "$REMOTE" ] || [ "$REMOTE" = "off" ] || [ -z "$RCLONE" ]; } && NAS_ON=0

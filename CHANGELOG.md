@@ -2,6 +2,17 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.8.0] - 2026-07-23
+### Added
+- **In-app NAS setup (SMB).** The Storage page has a **Set up NAS share…** button: enter your
+  server's Host, Share/path, and login, press **Test** to check the connection, then **Save**.
+  Loadout writes an **obscured** rclone SMB remote to `~/.config/rclone/rclone.conf` (0600) and
+  records only the non-secret `remote:path` in its config — **your password is never stored in
+  Loadout's config**. Saving rebuilds the union so the NAS tier mounts right away. Leaving the
+  password blank keeps the one already saved. `mount-setup.sh` now reads the NAS remote from the
+  config key `rom_rclone_remote`, so the whole three-tier union is set up from inside the app;
+  the legacy `$ROM_RCLONE_REMOTE` env var and `games:roms` default still apply when it's empty.
+
 ## [0.7.3] - 2026-07-23
 ### Fixed
 - The stale `offline-manager` / `Offline Manager` shortcut is now removed on the next refresh

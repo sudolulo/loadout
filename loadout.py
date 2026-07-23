@@ -17,6 +17,7 @@ from gi.repository import Gtk, Gdk, GLib, Pango, GdkPixbuf
 
 import steamgriddb                       # optional SteamGridDB cover art (no-op without a key)
 import steam_shortcuts                    # native Steam shortcuts.vdf management (drop-SRM)
+import nas_setup                          # in-app SMB share setup (obscured rclone remote)
 
 HOME = os.path.expanduser("~")
 # Where this AppImage's bundled scripts live. Loadout is a container: helper scripts
@@ -35,6 +36,10 @@ _DEFAULTS = {
                                                 #   Deck SD, an explicit path forces it,
                                                 #   "off" disables (internal + NAS only)
     "rom_nas":     "~/.cache/nas-roms",         # read-only NAS branch (rclone mount)
+    "rom_rclone_remote": "",                    # rclone "remote:path" for the NAS tier, set by
+                                                #   the in-app SMB setup; "" = no NAS (local-only),
+                                                #   "off" also disables. Secrets live in
+                                                #   rclone.conf, never here.
     "rom_union":   "~/Emulation/roms",          # the mergerfs union ES-DE/SRM read
     "default_target": "sd",                     # initial per-game disk when an SD exists
                                                 #   ("sd" or "internal"); overridable per game
@@ -47,7 +52,7 @@ _DEFAULTS = {
 }
 # Values expanduser'd on load; these two are plain strings (a mode / a path-or-sentinel),
 # so leave them raw and let the resolvers below interpret them.
-_RAW_KEYS = ("default_target", "rom_sd")
+_RAW_KEYS = ("default_target", "rom_sd", "rom_rclone_remote")
 CONFIG_PATH = os.path.expanduser(
     os.environ.get("LOADOUT_CONFIG", "~/.config/loadout/config.json"))
 
@@ -60,6 +65,24 @@ def _load_config():
     except Exception:
         pass
     return {k: (v if k in _RAW_KEYS else os.path.expanduser(v)) for k, v in cfg.items()}
+
+
+def save_config_value(key, value):
+    """Persist a single config key to config.json, preserving every other key already there
+    (atomic replace). Only non-secret values are ever written here — credentials go to
+    rclone.conf, never to config.json."""
+    data = {}
+    try:
+        with open(CONFIG_PATH) as f:
+            data = json.load(f)
+    except Exception:
+        pass
+    data[key] = value
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, CONFIG_PATH)
 
 
 def _detect_sd():
@@ -1160,6 +1183,11 @@ class StoragePage(Gtk.Box):
         self.detail = Gtk.Label(xalign=0)
         self.pack_start(self.detail, False, False, 0)
         self.btns = []
+        nb = Gtk.Button(label="Set up NAS share…   (SMB host / share / login)")
+        nb.set_size_request(500, 62)
+        nb.connect("clicked", lambda *_: self.open_nas_setup())
+        self.btns.append(nb)
+        self.pack_start(nb, False, False, 0)
         b = Gtk.Button(label="Rebuild union      (re-provision the tiers)")
         b.set_size_request(500, 62)
         b.connect("clicked", lambda *_: self.rebuild())
@@ -1236,6 +1264,105 @@ class StoragePage(Gtk.Box):
         self.refresh()
         self.app.reload()
         return False
+
+    def open_nas_setup(self):
+        """Modal SMB setup: Host / Share / User / Password -> an obscured rclone remote +
+        a non-secret remote:path in config.json. Test before saving; rebuild the union after."""
+        cur = _C.get("rom_rclone_remote", "") or ""
+        name0, path0 = "roms-nas", ""
+        if ":" in cur and cur.lower() != "off":
+            name0, path0 = cur.split(":", 1)
+        pre = nas_setup.read_remote(name0)
+
+        dlg = Gtk.Dialog(title="NAS share (SMB)", transient_for=self.app, modal=True)
+        dlg.set_default_size(580, 0)
+        box = dlg.get_content_area()
+        box.set_spacing(10)
+        box.set_border_width(16)
+        intro = Gtk.Label(xalign=0, label=(
+            "Point Loadout at your NAS's SMB share. The password is stored obscured in rclone's "
+            "config (0600) — never in Loadout's config. Leave the password blank to keep the one "
+            "already saved."))
+        intro.set_line_wrap(True)
+        box.pack_start(intro, False, False, 0)
+        grid = Gtk.Grid(column_spacing=10, row_spacing=8)
+
+        def field(row, label, text="", secret=False, ph=""):
+            grid.attach(Gtk.Label(label=label, xalign=1), 0, row, 1, 1)
+            e = Gtk.Entry()
+            e.set_hexpand(True)
+            e.set_text(text)
+            if ph:
+                e.set_placeholder_text(ph)
+            if secret:
+                e.set_visibility(False)
+                e.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+            grid.attach(e, 1, row, 1, 1)
+            return e
+
+        e_host = field(0, "Host", pre["host"], ph="192.168.10.14  or  truenas.local")
+        e_share = field(1, "Share / path", path0, ph="Games/roms")
+        e_user = field(2, "Username", pre["user"], ph="(blank = guest)")
+        e_pass = field(3, "Password", "", secret=True, ph="(unchanged)")
+        e_name = field(4, "Remote name", name0)
+        box.pack_start(grid, False, False, 0)
+        status = Gtk.Label(xalign=0)
+        status.set_line_wrap(True)
+        status.get_style_context().add_class("hint")
+        box.pack_start(status, False, False, 0)
+        dlg.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("Test", 10)
+        dlg.add_button("Save", Gtk.ResponseType.OK)
+        dlg.show_all()
+
+        def stat(color, msg):
+            status.set_markup("<span foreground='%s'>%s</span>"
+                              % (color, GLib.markup_escape_text(msg)))
+
+        def apply(persist):
+            host, share = e_host.get_text().strip(), e_share.get_text().strip()
+            user, pw = e_user.get_text().strip(), e_pass.get_text()
+            name = e_name.get_text().strip() or "roms-nas"
+            if not host or not share:
+                stat("#ff8a8a", "Host and Share are required.")
+                return None
+            try:
+                nas_setup.write_remote(name, host, user, pw, keep_existing_pass=True)
+            except Exception as ex:
+                stat("#ff8a8a", "rclone error: %s" % ex)
+                return None
+            remote = nas_setup.remote_path(name, share)
+            if persist:
+                save_config_value("rom_rclone_remote", remote)
+                _C["rom_rclone_remote"] = remote
+            return remote
+
+        def do_test():
+            remote = apply(persist=False)
+            if not remote:
+                return
+            status.set_text("Testing %s …" % remote)
+
+            def work():
+                ok, msg = nas_setup.test_remote(remote)
+                GLib.idle_add(stat, "#7fdc7f" if ok else "#ff8a8a", msg)
+            threading.Thread(target=work, daemon=True).start()
+
+        while True:
+            resp = dlg.run()
+            if resp == 10:                         # Test — keep the dialog open
+                do_test()
+                continue
+            if resp == Gtk.ResponseType.OK:
+                remote = apply(persist=True)
+                if remote is None:                 # validation failed — keep open
+                    continue
+                dlg.destroy()
+                self.prog.set_text("NAS set to %s — rebuilding the union…" % remote)
+                self.rebuild()
+            else:
+                dlg.destroy()
+            break
 
 
 class App(Gtk.Window):
