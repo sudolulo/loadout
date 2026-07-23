@@ -2,6 +2,23 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.8.4] - 2026-07-23
+### Fixed
+- **Loadout launches even when the NAS is unreachable.** A dropped/stale rclone (SMB) mount makes
+  every access to it — `os.listdir`, `stat`, `os.walk` — **hang uninterruptibly** in the FUSE wait
+  (a `try/except` can't catch it and the process can't even be killed), so Loadout froze at startup
+  while scanning the NAS and the window never appeared. Loadout now probes the NAS **once** at
+  startup with a give-up timeout and, if it's dead, treats it as absent for the session and never
+  touches it again — so it always comes up on your local games. Rebuild the union (Storage page) or
+  relaunch once the NAS is back.
+- **Controller input no longer freezes the UI in Game Mode.** The Deck's virtual pad streams
+  hundreds of stick/sensor samples per second; reading them in a tight loop was starving the GTK
+  main thread so navigation callbacks never ran. The reader now yields each cycle.
+### Changed
+- **New navigation.** Up/Down moves within the active list; **Left/Right swaps** between the
+  console list and the game list (the active one is highlighted). L1/R1 still jump consoles, A
+  toggles / opens, Y applies.
+
 ## [0.8.3] - 2026-07-23
 ### Fixed
 - **Controls work when Game Mode feeds input as the analog stick.** On the Deck, Steam often sends

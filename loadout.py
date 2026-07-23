@@ -27,6 +27,40 @@ HOME = os.path.expanduser("~")
 # own directory for a plain `python3 loadout.py` checkout run.
 APP_DIR = os.environ.get("LOADOUT_APP") or os.path.dirname(os.path.abspath(__file__))
 
+
+def _padlog(msg):
+    """Debug trace for input handling; no-op unless $LOADOUT_PAD_DEBUG is set."""
+    if not os.environ.get("LOADOUT_PAD_DEBUG"):
+        return
+    try:
+        with open(os.path.expanduser("~/loadout-pad.log"), "a") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
+
+def _mount_responsive(path, timeout=4):
+    """True if `path` can be listed within `timeout` seconds. A wedged rclone/FUSE mount makes
+    os.listdir() HANG (blocked in the FUSE wait), and — crucially — a process stuck in that wait
+    is UNINTERRUPTIBLE, so it can't even be killed (a subprocess with a timeout blocks too). The
+    only safe move is to ABANDON the probe: run it in a daemon thread and, if it hasn't answered
+    within `timeout`, give up and call the mount dead. The stuck thread leaks (harmless — it holds
+    only a released-GIL syscall and dies with the process), but the GUI thread is never blocked."""
+    import threading
+    ok = []
+
+    def probe():
+        try:
+            os.listdir(path)
+            ok.append(True)
+        except Exception:
+            ok.append(False)
+
+    t = threading.Thread(target=probe, daemon=True)
+    t.start()
+    t.join(timeout)
+    return bool(ok) and ok[0]      # timed-out (thread still stuck) -> ok is empty -> False
+
 # --- configuration -------------------------------------------------------------
 # Everything the manager touches is a path, and every path is overridable. Defaults
 # match a standard EmuDeck + rclone-union layout; drop a JSON at the config path (or set
@@ -141,6 +175,11 @@ ROM_TARGET = ROM_SD if DEFAULT_DEST == "sd" else ROM_LOCAL   # filesystem the di
 COVERS_ON = steamgriddb.enabled()                           # show game cover art (needs a key)
 COVER_W, COVER_H = 46, 69                                    # in-list thumbnail size (2:3)
 RECENT_ON = bool(_C["recent_on_add"])                       # surface new games on the Recent shelf
+# Probe the NAS mount ONCE. A wedged rclone/FUSE mount hangs EVERY access (listdir/stat/walk) in an
+# uninterruptible wait, so if it's unresponsive we treat the NAS as absent for the whole session and
+# never touch it again — Loadout still runs on local games (rebuild the union or relaunch once the
+# NAS is back). One probe => at most one leaked probe thread; every NAS access below checks NAS_OK.
+NAS_OK = _mount_responsive(ROM_NAS)
 
 
 def dest_dir(dest):
@@ -385,6 +424,16 @@ class Gamepad(threading.Thread):
         self.devs = []
         self.axis_dir = {}          # axis code -> current committed direction (-1/0/1)
         self.axis_at = {}           # axis code -> last time it fired (for auto-repeat)
+        self._dbg = bool(os.environ.get("LOADOUT_PAD_DEBUG"))
+
+    def _log(self, msg):
+        if not self._dbg:
+            return
+        try:
+            with open(os.path.expanduser("~/loadout-pad.log"), "a") as f:
+                f.write(msg + "\n")
+        except Exception:
+            pass
 
     def _axis(self, e, code, value, now):
         """Map a D-pad hat OR an analog stick axis to a nav move. On the Deck, Game Mode can feed
@@ -413,9 +462,12 @@ class Gamepad(threading.Thread):
         if d != prev or (now - self.axis_at.get(code, 0) > 0.25):   # fresh commit or auto-repeat
             self.axis_at[code] = now
             if code in VERT:
-                GLib.idle_add(self.app.pad_move, d)                 # +1 down, -1 up = scroll list
+                GLib.idle_add(self.app.pad_move, d)                 # move within the active list
             else:
-                GLib.idle_add(self.app.next_nav if d > 0 else self.app.prev_nav)  # switch section
+                pane = "content" if d > 0 else "sidebar"           # right=games, left=console list
+                if self._dbg:
+                    self._log("FIRE code=%d d=%d -> pane %s" % (code, d, pane))
+                GLib.idle_add(self.app.set_pane, pane)
         self.axis_dir[code] = d
 
     def find(self):
@@ -463,14 +515,19 @@ class Gamepad(threading.Thread):
         # some controllers report the D-pad as buttons rather than the ABS_HAT0 axes; handle both.
         DPAD = {}
         for code, act in (("BTN_DPAD_UP", ("move", -1)), ("BTN_DPAD_DOWN", ("move", 1)),
-                          ("BTN_DPAD_LEFT", ("nav", -1)), ("BTN_DPAD_RIGHT", ("nav", 1))):
+                          ("BTN_DPAD_LEFT", ("pane", "sidebar")), ("BTN_DPAD_RIGHT", ("pane", "content"))):
             if hasattr(e, code):
                 DPAD[getattr(e, code)] = act
         sel = selectors.DefaultSelector()
         fds = {}                       # path -> registered InputDevice
         last_scan, announced = 0.0, None
+        self._log("=== gamepad run start ===")
+        total, last_hb = 0, 0.0
         while True:
             now = time.time()
+            if self._dbg and now - last_hb > 5.0:
+                last_hb = now
+                self._log("alive fds=%d total_events=%d" % (len(fds), total))
             # (Re)scan for controllers rather than enumerating once: in Game Mode Steam creates its
             # virtual pad AFTER we launch, and controllers hotplug, so keep looking until one arrives.
             if now - last_scan > 2.0:
@@ -485,7 +542,9 @@ class Gamepad(threading.Thread):
                         try:
                             sel.register(d, selectors.EVENT_READ)
                             fds[d.path] = d
-                        except Exception:
+                            self._log("registered %s (%s)" % (d.name, d.path))
+                        except Exception as ex:
+                            self._log("register FAIL %s: %s" % (d.path, ex))
                             try:
                                 d.close()
                             except Exception:
@@ -495,6 +554,11 @@ class Gamepad(threading.Thread):
                 if status != announced:
                     announced = status
                     GLib.idle_add(self.app.set_pad_status, status)
+            # The Deck's virtual pad streams stick/gyro samples continuously (hundreds/sec). Reading
+            # that in a tight non-blocking loop pins this thread and starves the GTK main thread of
+            # the GIL, so the idle_add nav callbacks NEVER run — the controls look dead. A short
+            # sleep each cycle yields the GIL (time.sleep releases it) while staying responsive.
+            time.sleep(0.008)
             for key, _ in sel.select(timeout=1):
                 d = key.fileobj
                 try:
@@ -507,7 +571,10 @@ class Gamepad(threading.Thread):
                     fds.pop(getattr(d, "path", None), None)
                     continue
                 for ev in events:
+                    total += 1
                     if ev.type == e.EV_KEY and ev.value == 1:
+                        if self._dbg:
+                            self._log("KEY code=%d (%s)" % (ev.code, BTN.get(ev.code, DPAD.get(ev.code, "?"))))
                         if ev.code in BTN:
                             GLib.idle_add(self.app.pad_action, BTN[ev.code])
                         elif ev.code in DPAD:
@@ -515,8 +582,10 @@ class Gamepad(threading.Thread):
                             if kind == "move":
                                 GLib.idle_add(self.app.pad_move, arg)
                             else:
-                                GLib.idle_add(self.app.next_nav if arg > 0 else self.app.prev_nav)
+                                GLib.idle_add(self.app.set_pane, arg)
                     elif ev.type == e.EV_ABS:
+                        if self._dbg and (ev.code in (e.ABS_HAT0X, e.ABS_HAT0Y) or abs(ev.value) > 6000):
+                            self._log("ABS code=%d val=%d" % (ev.code, ev.value))
                         self._axis(e, ev.code, ev.value, now)
 
 
@@ -540,7 +609,7 @@ def system_stats(system):
     branch (internal or SD). media/gamelist scaffolding is ignored so an ES-DE stub dir
     does not read as a pulled system."""
     info = {}
-    bases = [(os.path.join(ROM_NAS, system), False)]
+    bases = [(os.path.join(ROM_NAS, system), False)] if NAS_OK else []
     bases += [(os.path.join(b, system), True) for b in ROM_LOCALS]
     for base, isloc in bases:
         if not os.path.isdir(base):
@@ -665,9 +734,10 @@ class GameRow:
 
 
 def _local_bases(system):
-    """(base_dir, holding_branch_or_None) for the NAS branch then every local branch."""
-    return [(os.path.join(ROM_NAS, system), None)] + \
-           [(os.path.join(b, system), b) for b in ROM_LOCALS]
+    """(base_dir, holding_branch_or_None) for the NAS branch (only when it's alive) then every
+    local branch. A dead NAS mount is omitted so nothing walks/stat's a wedged FUSE path."""
+    nas = [(os.path.join(ROM_NAS, system), None)] if NAS_OK else []
+    return nas + [(os.path.join(b, system), b) for b in ROM_LOCALS]
 
 
 def enumerate_folder_games(system):
@@ -765,10 +835,15 @@ def scan():
     playable = {k for k, v in manifest.items()
                 if isinstance(v, dict) and v.get("kind") in PLAYABLE}
     seen = set()
-    for base in (PC_NAS, PC_LOCAL):
+    pc_bases = (PC_NAS, PC_LOCAL) if _mount_responsive(PC_NAS) else (PC_LOCAL,)
+    for base in pc_bases:
         if not os.path.isdir(base):
             continue
-        for n in sorted(os.listdir(base)):
+        try:
+            pc_names = sorted(os.listdir(base))
+        except OSError:
+            continue          # a dropped mount must never crash the launch
+        for n in pc_names:
             if n.startswith(".") or n in SKIP or n in seen:
                 continue
             if not os.path.isdir(os.path.join(base, n)):
@@ -778,16 +853,27 @@ def scan():
             seen.add(n)
             pc.append(Row("pc", n))
     sseen, games = set(), []
-    for base in (ROM_NAS, *ROM_LOCALS):
+    # only include the (networked) NAS branch if it responds; a wedged rclone mount would otherwise
+    # HANG os.listdir and freeze the whole launch. Local branches are always scanned.
+    rom_bases = (ROM_NAS, *ROM_LOCALS) if NAS_OK else tuple(ROM_LOCALS)
+    for base in rom_bases:
         if not os.path.isdir(base):
             continue
-        for name in sorted(os.listdir(base)):
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            continue          # a dropped rclone / stale mount must never crash the launch
+        for name in names:
             p = os.path.join(base, name)
             # "_"-prefixed dirs are the ROM sorter's non-console buckets (e.g. _unsorted --
             # a catch-all for ROMs it couldn't file); never manage those as a system.
             if name.startswith((".", "_")) or name in sseen or not os.path.isdir(p):
                 continue
-            if not [f for f in os.listdir(p) if not f.startswith(".") and f not in SKIP]:
+            try:
+                has_content = any(f for f in os.listdir(p) if not f.startswith(".") and f not in SKIP)
+            except OSError:
+                continue
+            if not has_content:
                 continue
             sseen.add(name)
             if is_update_dlc(name):
@@ -1246,9 +1332,11 @@ def union_status():
     tiers = [("Internal", ROM_LOCAL, "RW", os.path.isdir(ROM_LOCAL), free_on(ROM_LOCAL))]
     if ROM_SD:
         tiers.append(("SD", ROM_SD, "RW", os.path.isdir(ROM_SD), free_on(ROM_SD)))
-    nas_up = os.path.ismount(ROM_NAS)
+    # use the one-time NAS probe, NOT os.path.ismount()/statvfs() which HANG on a wedged rclone
+    # mount; only statvfs the NAS when it's known alive, so a dead NAS can't freeze the Storage page.
+    nas_up = NAS_OK
     tiers.append(("NAS", ROM_NAS, "RO", nas_up, free_on(ROM_NAS) if nas_up else 0))
-    return os.path.ismount(ROM_UNION), tiers
+    return _mount_responsive(ROM_UNION), tiers
 
 
 class StoragePage(Gtk.Box):
@@ -1634,6 +1722,7 @@ class App(Gtk.Window):
             self.nav[self.nav_index]["row"].grab_focus()
             return False
         pg = self.page()
+        _padlog("  pad_move(%d) EXEC page=%s rows=%d" % (delta, type(pg).__name__, len(getattr(pg, "rows", []) or [])))
         if getattr(pg, "is_panel", False):
             pg.move_focus(delta); return False
         if not pg.rows:
@@ -1641,8 +1730,12 @@ class App(Gtk.Window):
         path, _ = pg.view.get_cursor()
         i = (path.get_indices()[0] if path else 0) + delta
         i = max(0, min(i, len(pg.rows) - 1))
-        pg.view.set_cursor(i)
-        pg.view.scroll_to_cell(i)
+        try:
+            pg.view.set_cursor(Gtk.TreePath.new_from_indices([i]))
+            pg.view.scroll_to_cell(i)
+            _padlog("    cursor -> %d OK" % i)
+        except Exception as ex:
+            _padlog("    set_cursor RAISED: %r" % ex)
         return False
 
     def pad_action(self, name):
@@ -1696,9 +1789,13 @@ class App(Gtk.Window):
         return False
 
     def update_focus_hint(self):
+        if self.focus_pane == "sidebar":
+            self.focus_label.set_text(
+                "↑/↓ = choose console    •    → or A = go to its games    •    L1/R1 = jump")
+            return
         pg = self.page()
         disk = "    •    Start = copy to SD / Internal" if HAVE_SD else ""
-        nav = "    •    ←/→ = section    •    ↑/↓ = move"
+        nav = "    •    ← = console list"
         if getattr(pg, "steam_col", False):
             self.focus_label.set_text(
                 "A = keep this game Offline    •    X = show it in Steam" + disk + nav)
@@ -1737,6 +1834,7 @@ class App(Gtk.Window):
         for i, e in enumerate(self.nav):
             if e["key"] == key:
                 self.nav_index = i
+                _padlog("  _on_nav_row EXEC -> idx=%d key=%s" % (i, key))
                 self.stack.set_visible_child(e["page"])
                 if hasattr(e["page"], "load_covers"):
                     e["page"].load_covers()        # lazily fetch covers for the shown section
@@ -1746,6 +1844,7 @@ class App(Gtk.Window):
 
     def select_nav(self, i):
         i = max(0, min(i, len(self.nav) - 1))
+        _padlog("  select_nav(%d) EXEC" % i)
         self.sidebar.select_row(self.nav[i]["row"])    # fires _on_nav_row
 
     def prev_nav(self):
@@ -1847,6 +1946,7 @@ class App(Gtk.Window):
 
     def on_key(self, _w, ev):
         k = Gdk.keyval_name(ev.keyval) or ""
+        _padlog("KEY-GTK %s" % k)
         if self.confirm is not None:
             if k in ("space", "Return", "KP_Enter", "a", "A"):
                 self.do_apply()
@@ -1854,9 +1954,9 @@ class App(Gtk.Window):
                 self.hide_banner()
             return True
         if k in ("Left",):
-            self.prev_nav(); return True
+            self.set_pane("sidebar"); return True
         if k in ("Right",):
-            self.next_nav(); return True
+            self.set_pane("content"); return True
         if k in ("space", "Return", "KP_Enter"):
             self.page().toggle_current(0); return True
         if k in ("y", "Y"):
