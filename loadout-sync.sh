@@ -25,7 +25,10 @@ if [ -f "$HOME/steam-wait-screen.py" ]; then
   WAIT_PID=$!
 fi
 
-bash "$HOME/srm-refresh.sh" >> "$LOG" 2>&1
+# Native refresh (no SRM) by default; srm-refresh.sh stays available for anyone who wants SRM's
+# extra artwork/scraping and runs it themselves.
+REFRESH="$HOME/steam-refresh.sh"; [ -f "$REFRESH" ] || REFRESH="$HOME/srm-refresh.sh"
+bash "$REFRESH" >> "$LOG" 2>&1
 rc=$?
 [ -n "$WAIT_PID" ] && kill "$WAIT_PID" 2>/dev/null
 if [ $rc -eq 0 ]; then

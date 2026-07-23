@@ -32,10 +32,14 @@ an `Emulation/roms(-local)` tree); set `rom_sd` in the config to force a path or
 it. All tier paths come from the same `config.json` the GUI reads, so setup and manager always
 agree. No SD is fine (Internal + NAS); no NAS is fine too (local-only union — see below).
 
-## SRM automation — `srm-refresh.sh`, `fix_collections.py`, `loadout-sync.sh`
-Rebuild the Steam ROM Manager shortcuts + per-console collections without leaving Gaming Mode
-(works around SRM needing an X server while silently skipping categories when Steam is up).
-`loadout-sync.sh` is a flag-watched systemd path unit that runs the refresh on Apply.
+## Steam shortcuts — `steam-refresh.sh`, `fix_collections.py`, `loadout-sync.sh`
+Loadout manages your ROM Steam shortcuts **natively — no Steam ROM Manager needed**. It learns
+each system's launch template from your existing shortcuts and writes matching ones itself, so
+games launch identically. On exit, `loadout-sync.sh` (a flag-watched systemd path unit) runs
+`steam-refresh.sh`, which — with Steam briefly stopped, guarded against a live game — reconciles
+Steam shortcuts with what you've enabled, fetches cover art, writes per-console collections, and
+returns you to Game Mode (or restarts Steam on the desktop). `srm-refresh.sh` remains if you'd
+rather use SRM's extra scraping.
 
 ## Saves — `deck-saves.sh`, `deck-saves-daemon.sh`, `steam-account.py`
 Emulator saves synced to the NAS under the **signed-in Steam account**, so a profile resumes on

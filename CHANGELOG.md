@@ -2,6 +2,18 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.7.0] - 2026-07-23
+### Added
+- **Native Steam ROM shortcuts — Steam ROM Manager is no longer required.** Loadout learns each
+  system's launch template from the existing shortcuts and writes matching ones itself, so games
+  launch identically. On exit it runs a native refresh (`steam-refresh.sh`) that reconciles Steam
+  shortcuts with what you've enabled + fetches SteamGridDB art, all with Steam briefly stopped —
+  no SRM. `srm-refresh.sh` stays available if you still want SRM's extra scraping.
+  (Validated on a 223-entry library: template regeneration 205/205 exact; the sync is idempotent
+  and never duplicates, clobbers, or drops an entry — it dedups by rom path, skips broken symlinks.)
+### Changed
+- Loadout opens on the first section that actually has games (skips an empty PC Games).
+
 ## [0.6.0] - 2026-07-23
 ### Added
 - **Game cover art** (SteamGridDB). With an API key set (`~/.config/loadout/steamgriddb.key`,
