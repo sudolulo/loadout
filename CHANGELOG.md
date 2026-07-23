@@ -2,6 +2,24 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.7.2] - 2026-07-23
+### Changed
+- **Loadout is now a true self-contained container.** Every helper script (the Steam refresh,
+  the copy worker, save sync, mount setup) runs from *inside* the AppImage — nothing is ever
+  copied into your home directory and no script in `~` is ever executed. The systemd `--user`
+  units it installs only *invoke the AppImage itself* (`Loadout.AppImage --refresh` / `--worker`
+  / `--saves-daemon`), so the logic that runs is always exactly the code in the AppImage you're
+  running, even after a self-update or a move.
+- **The Steam refresh never falls back to Steam ROM Manager.** The old
+  `dirty-flag → loadout-sync.sh → srm-refresh.sh` chain is gone; the native refresh is the only
+  path. On launch Loadout tears down any earlier script-based install (the units *and* the copied
+  scripts) — this is what removes the regression where a leftover SRM refresh re-added the old
+  `offline-manager` shortcut and dropped Loadout's own artwork.
+### Fixed
+- Steam now restarts **exactly once** after Apply: the pending-refresh flag is cleared *before*
+  the Game-Mode/desktop restart, so the path unit can't re-fire and loop.
+- The stale `offline-manager` shortcut is removed automatically on the next refresh.
+
 ## [0.7.1] - 2026-07-23
 ### Added
 - **Built-in launch templates** for the standard EmuDeck layout, so Loadout works on a **fresh

@@ -1,27 +1,136 @@
 #!/bin/bash
-# Loadout AppImage entrypoint. Relies on SteamOS's system python3 + GTK (gi) — verified
-# present on the Deck — so the AppImage stays small and doesn't bundle a fragile runtime.
+# Loadout AppImage entrypoint. Loadout is a CONTAINER: every helper script lives inside the
+# AppImage and runs from the mounted payload ($APP). Nothing is ever copied into $HOME, and no
+# script in $HOME is ever executed. The systemd --user units only *invoke this AppImage* with a
+# subcommand ($APPIMAGE --worker / --refresh / --saves-daemon), so the logic is always the code
+# shipped in the running AppImage — never a stale ~ copy, never Steam ROM Manager, never a fallback.
 HERE="$(dirname "$(readlink -f "$0")")"
 APP="$HERE/usr/share/loadout"
-export PATH="$HOME/bin:$PATH"
+# $APPIMAGE is set by the AppImage runtime to the .AppImage's own path; fall back for a raw AppRun.
+AI="${APPIMAGE:-$HERE/AppRun}"
+export PATH="$HOME/bin:$PATH" LOADOUT_APP="$APP"
+
+# --- container install: config + systemd units that only INVOKE this AppImage --------------
+gen_units() {
+  local UD="$HOME/.config/systemd/user"
+  mkdir -p "$UD" "$HOME/.config/loadout" "$HOME/.local/share/applications" \
+           "$HOME/.local/share/icons/hicolor/256x256/apps"
+  [ -f "$HOME/.config/loadout/config.json" ] || \
+    cp "$APP/config.example.json" "$HOME/.config/loadout/config.json" 2>/dev/null
+
+  # background copy worker: fires when the GUI drops a copy queue
+  cat > "$UD/loadout-worker.service" <<U
+[Unit]
+Description=Loadout background copy worker
+StartLimitIntervalSec=600
+StartLimitBurst=10
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+ExecStart=$AI --worker
+Restart=on-failure
+RestartSec=30
+U
+  cat > "$UD/loadout-worker.path" <<U
+[Unit]
+Description=Watch for queued Loadout copies
+[Path]
+PathExists=%h/.loadout-queue.json
+Unit=loadout-worker.service
+[Install]
+WantedBy=default.target
+U
+
+  # exit-time native Steam refresh: fires when the GUI drops the dirty flag
+  cat > "$UD/loadout-refresh.service" <<U
+[Unit]
+Description=Sync Loadout changes into Steam (native — no SRM)
+[Service]
+Type=oneshot
+TimeoutStartSec=1800
+ExecStart=$AI --refresh
+U
+  cat > "$UD/loadout-refresh.path" <<U
+[Unit]
+Description=Watch for pending Loadout changes
+[Path]
+PathExists=%h/.loadout-dirty
+Unit=loadout-refresh.service
+[Install]
+WantedBy=default.target
+U
+
+  # save-sync daemon (pull on idle when the NAS is newer, push when a game exits)
+  cat > "$UD/loadout-saves.service" <<U
+[Unit]
+Description=Loadout emulator save sync
+After=graphical-session.target
+[Service]
+Type=simple
+ExecStart=$AI --saves-daemon
+ExecStop=$AI --saves backup
+TimeoutStopSec=180
+Restart=always
+RestartSec=30
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+[Install]
+WantedBy=default.target
+U
+
+  # Retire every earlier script-in-\$HOME install (offline-manager AND the pre-container loadout),
+  # plus the units that ran them. This is what un-does the SRM regression: the old loadout-srm.path
+  # → loadout-sync.sh → srm-refresh.sh chain (which re-added the offline-manager shortcut and
+  # dropped Loadout's art) is torn down here and replaced by the native refresh above.
+  local OLD_UNITS="loadout-srm.path loadout-srm.service deck-saves-daemon.service \
+offline-manager-worker.path offline-manager-worker.service \
+offline-manager-srm.path offline-manager-srm.service"
+  systemctl --user disable --now $OLD_UNITS 2>/dev/null
+  ( cd "$UD" 2>/dev/null && rm -f $OLD_UNITS )
+  rm -f "$HOME"/loadout.py "$HOME"/loadout-worker.py "$HOME"/loadout_update.py "$HOME"/steamgriddb.py \
+        "$HOME"/steam_shortcuts.py "$HOME"/loadout-sync.sh "$HOME"/steam-refresh.sh "$HOME"/srm-refresh.sh \
+        "$HOME"/fix_collections.py "$HOME"/mount-setup.sh "$HOME"/deck-saves.sh "$HOME"/deck-saves-daemon.sh \
+        "$HOME"/steam-account.py "$HOME"/ps3-esde-setup.sh \
+        "$HOME"/offline-manager.py "$HOME"/offline-worker.py "$HOME"/offline-sync.sh 2>/dev/null
+
+  # migrate an old offline-manager config if the new one doesn't exist yet
+  [ -d "$HOME/.config/offline-manager" ] && [ ! -d "$HOME/.config/loadout" ] && \
+    mv "$HOME/.config/offline-manager" "$HOME/.config/loadout" 2>/dev/null
+
+  # desktop entry + icon so Loadout shows in the app menu (Exec points at this AppImage)
+  [ -f "$APP/loadout.png" ] && \
+    cp "$APP/loadout.png" "$HOME/.local/share/icons/hicolor/256x256/apps/loadout.png" 2>/dev/null
+  cat > "$HOME/.local/share/applications/loadout.desktop" <<U
+[Desktop Entry]
+Type=Application
+Name=Loadout
+Comment=Steam Deck game-library manager
+Exec=$AI
+Icon=loadout
+Categories=Game;Utility;
+Terminal=false
+U
+
+  systemctl --user daemon-reload 2>/dev/null
+  systemctl --user enable --now loadout-worker.path loadout-refresh.path loadout-saves.service 2>/dev/null
+}
 
 case "${1:-}" in
-  --worker)  exec python3 "$APP/loadout-worker.py" ;;            # systemd user service
-  --update)  exec python3 "$APP/loadout_update.py" ;;           # check + self-replace
-  --sync-steam|--sync-steam-dry) exec python3 "$APP/loadout.py" "$1" ;;  # native Steam sync
-  --refresh) shift; exec bash "$APP/steam-refresh.sh" "$@" ;;   # exit-time Steam refresh
-  --install) shift; exec bash "$APP/install.sh" "$@" ;;         # full install (scripts+units+migrate)
-  --help|-h) echo "Loadout.AppImage [--worker|--update|--install]"; exit 0 ;;
+  --worker)       exec python3 "$APP/loadout-worker.py" ;;               # background copy service
+  --update)       exec python3 "$APP/loadout_update.py" ;;              # check + self-replace
+  --sync-steam|--sync-steam-dry) exec python3 "$APP/loadout.py" "$1" ;; # native Steam reconcile
+  --refresh)      exec bash "$APP/steam-refresh.sh" "$APP" ;;           # exit-time Steam refresh
+  --saves-daemon) exec bash "$APP/deck-saves-daemon.sh" ;;             # save-sync daemon
+  --saves)        shift; exec bash "$APP/deck-saves.sh" "$@" ;;         # save-sync one-shot (ExecStop)
+  --mount-setup)  exec bash "$APP/mount-setup.sh" ;;                    # provision the union
+  --install)      gen_units; echo "Loadout container installed."; exit 0 ;;
+  --help|-h)      echo "Loadout.AppImage [--worker|--refresh|--saves-daemon|--update|--sync-steam|--mount-setup|--install]"; exit 0 ;;
 esac
 
-# Default launch: keep the ~ helper scripts in sync with THIS AppImage (the systemd units
-# and Apply-time hooks run them from $HOME), ensure a config exists, then run the GUI.
-for f in loadout-worker.py loadout_update.py steamgriddb.py steam_shortcuts.py loadout-sync.sh \
-         srm-refresh.sh fix_collections.py deck-saves.sh deck-saves-daemon.sh steam-account.py \
-         ps3-esde-setup.sh mount-setup.sh; do
-  [ -f "$APP/$f" ] && install -m 0755 "$APP/$f" "$HOME/$f" 2>/dev/null
-done
-mkdir -p "$HOME/.config/loadout"
-[ -f "$HOME/.config/loadout/config.json" ] || cp "$APP/config.example.json" "$HOME/.config/loadout/config.json" 2>/dev/null
-
+# Default launch: (re)generate the container's units — so they always point at THIS AppImage's
+# current path even after a move or self-update — ensure config, then run the GUI.
+gen_units >/dev/null 2>&1
 exec python3 "$APP/loadout.py"

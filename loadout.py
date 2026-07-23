@@ -19,6 +19,11 @@ import steamgriddb                       # optional SteamGridDB cover art (no-op
 import steam_shortcuts                    # native Steam shortcuts.vdf management (drop-SRM)
 
 HOME = os.path.expanduser("~")
+# Where this AppImage's bundled scripts live. Loadout is a container: helper scripts
+# (deck-saves.sh, mount-setup.sh, fix_collections.py, …) run from INSIDE the AppImage
+# payload, never from a copy in ~. AppRun exports $LOADOUT_APP; fall back to this file's
+# own directory for a plain `python3 loadout.py` checkout run.
+APP_DIR = os.environ.get("LOADOUT_APP") or os.path.dirname(os.path.abspath(__file__))
 
 # --- configuration -------------------------------------------------------------
 # Everything the manager touches is a path, and every path is overridable. Defaults
@@ -227,7 +232,10 @@ def sync_steam(dry_run=False):
     if not add and not rem:
         return 0, 0
     remidx = {existing[rom] for rom in rem}
-    kept = [ents[i] for i in range(len(ents)) if i not in remidx]
+    # also drop the stale offline-manager shortcut (Loadout's old name) if it's lingering
+    _stale = ("offline-manager", "offline manager")
+    kept = [ents[i] for i in range(len(ents)) if i not in remidx
+            and str(steam_shortcuts._ci(ents[i][1], "AppName")).strip().lower() not in _stale]
     grid = os.path.join(cfg, "grid")
     for rom, sysid, appname in add:
         aid, pairs = steam_shortcuts.game_entry(appname, tmpls[sysid], rom)
@@ -252,7 +260,7 @@ QUEUE = os.path.join(HOME, ".loadout-queue.json")
 PROGRESS = os.path.join(HOME, ".loadout-progress.json")
 PC_UNION = _C["pc_union"]
 SRM = _C["srm_appimage"]
-SAVES_SCRIPT = _C["saves_script"]
+SAVES_SCRIPT = os.path.join(APP_DIR, "deck-saves.sh")   # bundled in the AppImage, not ~
 SKIP = ("media", "metadata.txt", "systeminfo.txt")
 
 CSS = b"""
@@ -264,6 +272,11 @@ button { padding: 12px 22px; border-radius: 8px; font-weight: bold; }
 list.nav { background: #16191f; padding: 6px; }
 list.nav row { padding: 9px 6px; border-radius: 8px; }
 list.nav row:selected { background: #3b82f6; }
+/* dim the selected section while the content pane has focus; brighten it (accent bar)
+   while the sidebar itself is the active pane, so it's obvious which the D-pad drives. */
+list.nav:not(.focused) row:selected { background: #33507f; }
+list.nav.focused { background: #1b2230; }
+list.nav.focused row:selected { background: #3b82f6; border-left: 3px solid #fbbf24; }
 .navhdr { font-size: 11pt; font-weight: bold; color: #6b7280; padding: 14px 6px 4px 6px; }
 .navitem { font-size: 15pt; }
 .hint { font-size: 13pt; color: #9aa0a6; }
@@ -383,8 +396,10 @@ class Gamepad(threading.Thread):
                         if ev.code == e.ABS_HAT0Y and ev.value:
                             GLib.idle_add(self.app.pad_move, 1 if ev.value > 0 else -1)
                         elif ev.code == e.ABS_HAT0X and ev.value:
-                            GLib.idle_add(self.app.pad_action,
-                                          "r1" if ev.value > 0 else "l1")
+                            # D-pad left/right moves the *focus* between the sidebar and the
+                            # content list; the L1/R1 bumpers still quick-jump sections.
+                            GLib.idle_add(self.app.set_pane,
+                                          "content" if ev.value > 0 else "sidebar")
                         elif ev.code == e.ABS_Y:
                             # left stick, with a deadzone and a repeat throttle
                             v = ev.value
@@ -1206,7 +1221,7 @@ class StoragePage(Gtk.Box):
 
         def work():
             try:
-                r = subprocess.run(["bash", os.path.join(HOME, "mount-setup.sh")],
+                r = subprocess.run(["bash", os.path.join(APP_DIR, "mount-setup.sh")],
                                    capture_output=True, text=True, timeout=180)
                 msg = "Union rebuilt." if r.returncode == 0 else "Rebuild reported an error."
             except Exception as e:
@@ -1252,6 +1267,7 @@ class App(Gtk.Window):
         self.sidebar.connect("row-selected", self._on_nav_row)
         self.nav = []                          # ordered SELECTABLE entries (headers excluded)
         self.nav_index = 0
+        self.focus_pane = "content"            # "sidebar" | "content": which pane the D-pad drives
         self.console_pages = {}
 
         self.pc_page = Page(self, "No playable PC games installed yet.", steam_col=True)
@@ -1369,11 +1385,11 @@ class App(Gtk.Window):
 
     def quit_app(self):
         # Copying happens in a systemd service now, so closing here never cancels it.
-        """Exit. If anything changed, regenerate the launchers and leave a flag; the
-        launcher script then kicks off a FULL srm-refresh once this app is gone.
+        """Exit. If anything changed, leave the dirty flag; a systemd path unit then
+        fires the native Steam refresh (`Loadout.AppImage --refresh`) once this app is gone.
 
-        It cannot run here: a full refresh stops Steam, which would kill this process
-        mid-way, and srm-refresh's own guard refuses to run while a Steam-launched app
+        It cannot run here: the refresh stops Steam, which would kill this process
+        mid-way, and the refresh's own guard refuses to run while a Steam-launched app
         (this one) is still alive."""
         if self.dirty:
             try:
@@ -1395,7 +1411,12 @@ class App(Gtk.Window):
         self.update_focus_hint()
 
     def pad_move(self, delta):
-        """D-pad / stick moves the highlighted row (or button on a panel page)"""
+        """D-pad / stick moves the highlighted row. When focus is on the sidebar it walks the
+        sections (live-previewing each); otherwise it moves the row/button in the content pane."""
+        if self.focus_pane == "sidebar":
+            self.select_nav(self.nav_index + delta)
+            self.nav[self.nav_index]["row"].grab_focus()
+            return False
         pg = self.page()
         if getattr(pg, "is_panel", False):
             pg.move_focus(delta); return False
@@ -1416,7 +1437,10 @@ class App(Gtk.Window):
                 self.hide_banner()
             return False
         if name == "a":
-            self.page().toggle_current(0)
+            if self.focus_pane == "sidebar":    # A on the sidebar = enter the content list
+                self.set_pane("content")
+            else:
+                self.page().toggle_current(0)
         elif name == "b":
             if self.banner.get_visible():
                 self.hide_banner()
@@ -1456,18 +1480,22 @@ class App(Gtk.Window):
         return False
 
     def update_focus_hint(self):
+        if self.focus_pane == "sidebar":
+            self.focus_label.set_text(
+                "↑/↓ = choose section    •    A or → = open it    •    L1/R1 = jump sections")
+            return
         pg = self.page()
         disk = "    •    Start = copy to SD / Internal" if HAVE_SD else ""
+        nav = "    •    ← = sections"
         if getattr(pg, "steam_col", False):
             self.focus_label.set_text(
-                "A = keep this game Offline    •    X = show it in Steam" + disk + "    "
-                "(only Steam changes restart Steam at Apply)")
+                "A = keep this game Offline    •    X = show it in Steam" + disk + nav)
         elif getattr(pg, "is_saves", False):
-            self.focus_label.set_text("A = run the highlighted backup / restore")
+            self.focus_label.set_text("A = run the highlighted backup / restore" + nav)
         elif getattr(pg, "is_panel", False):
-            self.focus_label.set_text("A = rebuild the union    •    L1/R1 = switch section")
+            self.focus_label.set_text("A = rebuild the union" + nav)
         else:
-            self.focus_label.set_text("A = keep this collection Offline" + disk)
+            self.focus_label.set_text("A = keep this collection Offline" + disk + nav)
 
     def _nav_header(self, text):
         r = Gtk.ListBoxRow()
@@ -1514,6 +1542,21 @@ class App(Gtk.Window):
     def next_nav(self):
         self.select_nav(self.nav_index + 1)
 
+    def set_pane(self, pane):
+        """Move the D-pad focus to the sidebar or the content list, with a visible cue."""
+        self.focus_pane = pane
+        sc = self.sidebar.get_style_context()
+        if pane == "sidebar":
+            sc.add_class("focused")
+            row = self.nav[self.nav_index]["row"]
+            self.sidebar.select_row(row)
+            row.grab_focus()
+        else:
+            sc.remove_class("focused")
+            self._grab()
+        self.update_focus_hint()
+        return False
+
     def page(self):
         return self.nav[self.nav_index]["page"]
 
@@ -1544,7 +1587,7 @@ class App(Gtk.Window):
         """A previous exit may have failed to reach Steam (guard aborted, Deck slept).
         Say so plainly instead of leaving it invisible."""
         pending = os.path.exists(os.path.join(HOME, ".loadout-dirty"))
-        log = os.path.join(HOME, "loadout-sync.log")
+        log = os.path.join(HOME, "steam-refresh.log")
         last = ""
         try:
             lines = [l.strip() for l in open(log) if l.strip()]
@@ -1599,9 +1642,9 @@ class App(Gtk.Window):
                 self.hide_banner()
             return True
         if k in ("Left",):
-            self.prev_nav(); return True
+            self.set_pane("sidebar"); return True
         if k in ("Right",):
-            self.next_nav(); return True
+            self.set_pane("content"); return True
         if k in ("space", "Return", "KP_Enter"):
             self.page().toggle_current(0); return True
         if k in ("y", "Y"):
