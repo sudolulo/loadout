@@ -16,8 +16,27 @@
 #   status    machine-readable state for the manager GUI
 set -u
 RC="${RCLONE_BIN:-$HOME/bin/rclone}"
-RCLONE_REMOTE="${DECK_SAVES_REMOTE:-games}"       # rclone remote name (rclone config)
-SAVES_BASE="${DECK_SAVES_BASE:-games/Saves}"      # path within that remote
+# Where saves live on the NAS comes from the SAME config.json the GUI writes, so the in-app SMB
+# setup can point it anywhere. It used to be readable only from these environment variables,
+# which meant a share laid out differently could not be configured at all. Precedence:
+# config.json > environment > the historical default.
+_CFG=$(python3 - <<'PY' 2>/dev/null
+import json, os
+p = os.environ.get("LOADOUT_CONFIG") or os.path.expanduser("~/.config/loadout/config.json")
+try:
+    v = (json.load(open(p)).get("saves_rclone_remote") or "").strip()
+except Exception:
+    v = ""
+print(v if ":" in v and v.lower() != "off" else "")
+PY
+)
+if [ -n "${_CFG:-}" ]; then
+  RCLONE_REMOTE="${_CFG%%:*}"
+  SAVES_BASE="${_CFG#*:}"
+else
+  RCLONE_REMOTE="${DECK_SAVES_REMOTE:-games}"     # rclone remote name (rclone config)
+  SAVES_BASE="${DECK_SAVES_BASE:-games/Saves}"    # path within that remote
+fi
 STATE="$HOME/.deck-saves"; mkdir -p "$STATE"
 CURFILE="$STATE/current-account"     # whose saves are sitting in ~/Emulation right now
 FLAGS="--transfers=8 --checkers=8 --fast-list"

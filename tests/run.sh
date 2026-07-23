@@ -3,7 +3,7 @@
 # prints PASS/FAIL. GUI tests need xvfb; they are skipped (not silently passed) without it.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT/tests" || exit 1
-GUI="test_osk.py test_navosk.py test_pcsd.py test_move_ui.py test_pcsteam2.py"
+GUI="test_osk.py test_navosk.py test_pcsd.py test_move_ui.py test_pcsteam2.py test_detect.py test_settings.py"
 fail=0
 for t in test_move.py test_compat.py; do
   out=$(python3 "$t" 2>&1); r=$?
@@ -17,7 +17,7 @@ for t in $GUI; do
     printf '  %-22s SKIPPED (no xvfb-run)\n' "$t"
   fi
 done
-for t in test_pcsaves2.sh; do
+for t in test_pcsaves2.sh test_saves_config.sh; do
   out=$(bash "$t" 2>&1); r=$?
   printf '  %-22s %s\n' "$t" "$(tail -1 <<<"$out")"; [ $r -ne 0 ] && fail=1
 done

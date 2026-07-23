@@ -10,7 +10,7 @@ LOCAL copy; the NAS copy is never touched, so nothing is ever lost.
 
 Built for the Deck: 1280x800, large text, fully drivable from the pad.
 """
-import gi, json, os, shutil, subprocess, threading, time
+import gi, json, os, re, shutil, subprocess, threading, time
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib, Pango, GdkPixbuf
@@ -90,13 +90,18 @@ _DEFAULTS = {
     "pc_rclone_remote": "",                     # rclone "remote:path" for the PC NAS tier, e.g.
                                                 #   games:games/PC. "" / "off" = no NAS PC tier.
     "pc_union":    "~/Games/PC",                # the PC union you browse; the PC page reads it
-    "pc_manifest": "~/Games/PC/.manifest.json",  # ships on the NAS tier -> appears via the union
-    "srm_appimage": "~/Emulation/tools/Steam-ROM-Manager.AppImage",
+    "pc_manifest": "~/Games/PC/.manifest.json",
+    "saves_rclone_remote": "games:games/Saves",  # where emulator + PC saves are backed up, in the
+                                                #   same "remote:path" form as the tiers above.
+                                                #   Set by the in-app SMB setup; "off"/"" = no
+                                                #   save sync. Was env-only, so a share laid out
+                                                #   differently could not be configured at all.  # ships on the NAS tier -> appears via the union
 }
 # Values expanduser'd on load; these two are plain strings (a mode / a path-or-sentinel),
 # so leave them raw and let the resolvers below interpret them.
 _RAW_KEYS = ("default_target", "rom_sd", "pc_sd", "rom_rclone_remote", "pc_rclone_remote",
-             "recent_on_add", "recent_days", "recent_max")
+             "saves_rclone_remote",
+)
 CONFIG_PATH = os.path.expanduser(
     os.environ.get("LOADOUT_CONFIG", "~/.config/loadout/config.json"))
 
@@ -421,7 +426,7 @@ def sync_steam(dry_run=False):
         kept.append(("", pairs))
         added_aids.append(aid)
         record[name] = aid
-        if exe.lower().endswith(".exe"):
+        if pc_kind(exe) == "windows":
             # Decided by the executable, NOT the manifest's kind: a "portable" game is very
             # often a Windows .exe (BattleBlockTheater.exe, Unleashed.exe), and gating on the
             # label alone would leave those launching a Windows binary with no Proton at all.
@@ -465,6 +470,105 @@ def pc_pick(name):
     return os.path.join(PC_SF_DIR, name)
 
 
+# Executables that are part of a game folder but are not the game: installers, redistributables,
+# crash handlers. A repack whose only .exe is one of these is NOT playable -- it has to be
+# installed first -- which is exactly what keeps FitGirl/Inno repacks off the list.
+# Names that are never the game. Two rules, because the risk differs:
+#  - unambiguous tooling matches ANYWHERE, since it shows up glued into names with no separator
+#    ("FC3BDUpdater.exe") or dot-separated ("Game.Updater.exe");
+#  - ordinary words must be a whole token, so a game called "Server Simulator" is not thrown out.
+_TOOL_ANYWHERE = re.compile(
+    r'(quicksfv|winrar|unrar|vc_?redist|dxsetup|dxwebsetup|oalinst|unins|updater|patcher|'
+    r'keygen|crashhandler|crashreport|activation|editor|benchmark)', re.I)
+_TOOL_TOKEN = re.compile(
+    r'(^|[-_. ])(setup|install|installer|uninstall|directx|dotnet\w*|ndp\d|touchup|depends?|'
+    r'dependencies|prereq\w*|benchmark|config|settings|editor|server|dedicated|md5|sfv|'
+    r'checksum|update|patch|activate|readme|launcher_?setup)([-_. ]|$)', re.I)
+# NOTE: "editor" and "benchmark" match anywhere on purpose -- a game ships FC3Editor.exe, which
+# is bigger than the game itself, so a size-based pick lands on the editor without this.
+
+
+def _is_the_game(stem):
+    return not (_TOOL_ANYWHERE.search(stem) or _TOOL_TOKEN.search(stem))
+
+
+_NOT_GAME_DIRS = ("__bsa decompressor", "redist", "_redist", "directx", "_commonredist",
+                  "md5", "sfv", "checksums", "docs", "documentation", "crackfix", "patches")
+_NATIVE_EXT = (".appimage", ".x86_64", ".x86")
+_PLAYABLE_EXT = _NATIVE_EXT + (".sh", ".exe")
+
+
+def detect_entry(game_dir):
+    """The thing to run inside a game folder, found by looking at what is there.
+
+    Loadout used to rely entirely on a manifest generated elsewhere, so a folder it could see
+    perfectly well showed up as nothing at all. Now the folder itself is the source of truth:
+    a native Linux binary wins over a Windows one, and among Windows executables the largest
+    non-installer wins (the game is almost always the biggest .exe). Returns a path relative to
+    `game_dir`, or "" when nothing in there can be run -- an un-installed repack, say.
+    """
+    best_native, best_win = None, None
+    try:
+        for root, dirs, files in os.walk(game_dir):
+            depth = root[len(game_dir):].count(os.sep)
+            if depth >= 3:
+                dirs[:] = []                       # deep enough; game binaries are not buried
+            dirs[:] = [d for d in dirs
+                       if not d.startswith(".") and d.lower() not in _NOT_GAME_DIRS]
+            for f in files:
+                low = f.lower()
+                if not low.endswith(_PLAYABLE_EXT) or f.startswith("."):
+                    continue
+                full = os.path.join(root, f)
+                rel = os.path.relpath(full, game_dir)
+                try:
+                    sz = os.path.getsize(full)
+                except OSError:
+                    continue
+                if low.endswith(_NATIVE_EXT) or (low.endswith(".sh") and depth == 0):
+                    if not _is_the_game(os.path.splitext(f)[0]):
+                        continue
+                    if best_native is None or sz > best_native[0]:
+                        best_native = (sz, rel)
+                elif low.endswith(".exe"):
+                    if not _is_the_game(os.path.splitext(f)[0]):
+                        continue                   # an installer is not the game
+                    if best_win is None or sz > best_win[0]:
+                        best_win = (sz, rel)
+    except OSError:
+        return ""
+    pick = best_native or best_win
+    return pick[1] if pick else ""
+
+
+def _pc_empty_text():
+    """Say WHY the PC list is empty. It used to just show nothing, which looks identical whether
+    the union is missing, the folders hold only un-installed repacks, or there are no folders."""
+    if not _mount_responsive(PC_UNION):
+        return ("PC union not mounted (%s).\n"
+                "Storage → Rebuild union sets it up." % PC_UNION)
+    folders = [n for n in _safe_listdir(PC_UNION) if os.path.isdir(os.path.join(PC_UNION, n))]
+    if not folders:
+        return ("Nothing in %s yet.\n"
+                "Put a game folder there — or set the PC path in Storage → NAS share." % PC_UNION)
+    return ("%d folder%s here, but nothing in them can be run yet.\n"
+            "An un-installed repack (setup.exe and archives) is not playable until it is installed."
+            % (len(folders), "" if len(folders) == 1 else "s"))
+
+
+def _safe_listdir(path):
+    """listdir that never raises -- a dropped mount must not break the diagnostics view."""
+    try:
+        return [x for x in os.listdir(path) if not x.startswith(".")]
+    except OSError:
+        return []
+
+
+def pc_kind(entry):
+    """Whether running `entry` needs Proton."""
+    return "windows" if entry.lower().endswith(".exe") else "linux"
+
+
 def pc_exe(name, manifest=None):
     """The game's own executable, addressed THROUGH THE UNION so the shortcut survives the game
     moving between disks. Empty when the manifest does not say what to run."""
@@ -474,6 +578,8 @@ def pc_exe(name, manifest=None):
         except Exception:
             manifest = {}
     entry = (manifest.get(name) or {}).get("entry")
+    if not entry:
+        entry = detect_entry(os.path.join(PC_UNION, name))   # no manifest? read the folder
     return os.path.join(PC_UNION, name, entry) if entry else ""
 
 
@@ -493,7 +599,6 @@ def pc_record(rec=None):
     except OSError:
         pass
     return rec
-SRM = _C["srm_appimage"]
 SAVES_SCRIPT = os.path.join(APP_DIR, "deck-saves.sh")   # bundled in the AppImage, not ~
 SKIP = ("media", "metadata.txt", "systeminfo.txt")
 
@@ -993,13 +1098,15 @@ def scan():
         manifest = json.load(open(PC_MANIFEST))
     except Exception:
         pass
-    # Only PLAYABLE games belong on the PC tab. An installer -- a FitGirl / setup.exe
-    # repack that has not been installed yet (kind "wizard") -- is NOT playable, and
-    # neither is a raw scene release or anything unrecognised. You can only tick something
-    # you can actually run, so those are all hidden until they become a real installed game.
+    # Only PLAYABLE games belong on the PC tab: you can only tick something you can actually
+    # run. A curated manifest entry decides it when there is one; otherwise Loadout LOOKS IN
+    # THE FOLDER (detect_entry) rather than hiding a game just because nothing described it.
+    # Either way an un-installed repack -- whose only executable is an installer -- stays out.
     PLAYABLE = {"linux", "portable", "windows", "installed"}
-    playable = {k for k, v in manifest.items()
-                if isinstance(v, dict) and v.get("kind") in PLAYABLE}
+    manifest_says = {k for k, v in manifest.items()
+                     if isinstance(v, dict) and v.get("kind") in PLAYABLE and v.get("entry")}
+    manifest_denies = {k for k, v in manifest.items()
+                       if isinstance(v, dict) and v.get("kind") not in PLAYABLE}
     seen = set()
     pc_bases = ((PC_NAS, *PC_LOCALS) if _mount_responsive(PC_NAS) else tuple(PC_LOCALS))
     for base in pc_bases:
@@ -1014,8 +1121,10 @@ def scan():
                 continue
             if not os.path.isdir(os.path.join(base, n)):
                 continue
-            if n not in playable:            # installers / raw releases / unknown -> hidden
+            if n in manifest_denies:         # the manifest knows it is not runnable yet
                 continue
+            if n not in manifest_says and not detect_entry(os.path.join(base, n)):
+                continue                     # nothing in the folder can be run
             seen.add(n)
             pc.append(Row("pc", n))
     sseen, games = set(), []
@@ -1130,13 +1239,25 @@ def write_pc_picks(desired=None):
     try:
         games = json.load(open(PC_MANIFEST))
     except Exception:
-        return 0, 0
+        games = {}
     os.makedirs(PC_SF_DIR, exist_ok=True)
     _migrate_launchers()
+    # every folder Loadout can see, plus anything the manifest names
+    names = set(games)
+    for base in PC_LOCALS + [PC_NAS] if PC_NAS_OK else PC_LOCALS:
+        try:
+            names.update(n for n in os.listdir(base)
+                         if not n.startswith(".") and n not in SKIP
+                         and os.path.isdir(os.path.join(base, n)))
+        except OSError:
+            pass
     wanted, kept = set(), 0
-    for name, g in games.items():
-        if g.get("kind") not in ("linux", "portable", "windows", "installed") or not g.get("entry"):
-            continue                       # installers/wizards get no shortcut
+    for name in sorted(names):
+        g = games.get(name) or {}
+        if g and g.get("kind") not in ("linux", "portable", "windows", "installed"):
+            continue                       # the manifest says it cannot run yet
+        if not pc_exe(name, games):
+            continue                       # nothing runnable in the folder either
         if desired is not None and name not in desired:
             continue                       # not wanted on this Deck
         if desired is None and not pc_local_path(name):
@@ -1622,34 +1743,44 @@ class StoragePage(Gtk.Box):
         self.pack_start(hdr, False, False, 0)
         grid = Gtk.Grid(column_spacing=10, row_spacing=4)
         self.e_host = Gtk.Entry(); self.e_share = Gtk.Entry(); self.e_pcshare = Gtk.Entry()
-        self.e_user = Gtk.Entry(); self.e_pass = Gtk.Entry()
+        self.e_saves = Gtk.Entry(); self.e_user = Gtk.Entry(); self.e_pass = Gtk.Entry()
+        self.e_sgdb = Gtk.Entry()
         for i, (lbl, ent, ph) in enumerate((
                 ("Host", self.e_host, "192.168.10.14"),
                 ("ROM path", self.e_share, "games/roms"),
                 ("PC path", self.e_pcshare, "games/PC  (blank = no PC NAS)"),
+                ("Saves path", self.e_saves, "games/Saves  (blank = no save sync)"),
                 ("User", self.e_user, "(blank = guest)"),
-                ("Password", self.e_pass, "(unchanged)"))):
+                ("Password", self.e_pass, "(unchanged)"),
+                ("SteamGridDB key", self.e_sgdb, "(optional - enables cover art)"))):
             grid.attach(Gtk.Label(label=lbl, xalign=1), 0, i, 1, 1)
             ent.set_hexpand(True)
             ent.set_placeholder_text(ph)
             grid.attach(ent, 1, i, 1, 1)
-        self.e_pass.set_visibility(False)
-        self.e_pass.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+        for secret in (self.e_pass, self.e_sgdb):
+            secret.set_visibility(False)
+            secret.set_input_purpose(Gtk.InputPurpose.PASSWORD)
         self.pack_start(grid, False, False, 0)
 
         self.btns = []
         brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.b_disk = Gtk.Button(label="Default disk")
+        self.b_sd = Gtk.Button(label="SD card")
         for label, cb in (("Test", self.test_nas), ("Save & mount", self.save_nas),
-                          ("Rebuild union", self.rebuild), ("Prune empty", self.prune)):
-            b = Gtk.Button(label=label)
+                          ("Rebuild union", self.rebuild), ("Prune empty", self.prune),
+                          (None, self.cycle_default_disk), (None, self.toggle_sd),
+                          ("Diagnostics", self.diagnostics)):
+            b = self.b_disk if cb == self.cycle_default_disk else (
+                self.b_sd if cb == self.toggle_sd else Gtk.Button(label=label))
             b.set_size_request(170, 52)
             b.connect("clicked", lambda _w, f=cb: f())
             self.btns.append(b)
             brow.pack_start(b, False, False, 0)
         self.pack_start(brow, False, False, 0)
         # the pad walks the text fields too, so the share can be typed with the on-screen keyboard
-        self.focusables = [self.e_host, self.e_share, self.e_pcshare,
-                           self.e_user, self.e_pass] + self.btns
+        self.focusables = [self.e_host, self.e_share, self.e_pcshare, self.e_saves,
+                           self.e_user, self.e_pass, self.e_sgdb] + self.btns
+        self._sync_policy_labels()
         # A text field that CANNOT take focus cannot raise Steam's on-screen keyboard -- not
         # via our own navigation, and not via any GTK path that focuses the first focusable
         # child when a page is shown. Focus is granted only for the moment you press A on a
@@ -1747,11 +1878,18 @@ class StoragePage(Gtk.Box):
         pccur = _C.get("pc_rclone_remote", "") or ""
         if ":" in pccur and pccur.lower() != "off":
             pcpath = pccur.split(":", 1)[1]
+        savespath = ""
+        scur = _C.get("saves_rclone_remote", "") or ""
+        if ":" in scur and scur.lower() != "off":
+            savespath = scur.split(":", 1)[1]
         pre = nas_setup.read_remote(self._remote_name)
         self.e_host.set_text(pre.get("host", ""))
         self.e_user.set_text(pre.get("user", ""))
         self.e_share.set_text(path)
         self.e_pcshare.set_text(pcpath)
+        self.e_saves.set_text(savespath)
+        # the SteamGridDB key is never echoed back; a blank field means "leave it alone"
+        self.e_sgdb.set_text("")
 
     def _union_block(self, title, union_path, mounted, tiers, remote_key, nas_ok, unit):
         """Markup for one union: the union you browse, then the hidden tiers feeding it."""
@@ -1826,13 +1964,35 @@ class StoragePage(Gtk.Box):
         remote = nas_setup.remote_path(self._remote_name, share)
         pcshare = self.e_pcshare.get_text().strip()
         pcremote = nas_setup.remote_path(self._remote_name, pcshare) if pcshare else ""
+        savesshare = self.e_saves.get_text().strip()
+        savesremote = nas_setup.remote_path(self._remote_name, savesshare) if savesshare else ""
         if persist:
             save_config_value("rom_rclone_remote", remote)
             _C["rom_rclone_remote"] = remote
             save_config_value("pc_rclone_remote", pcremote)     # "" = local-only PC union
             _C["pc_rclone_remote"] = pcremote
+            save_config_value("saves_rclone_remote", savesremote)   # "" = no save sync
+            _C["saves_rclone_remote"] = savesremote
+            self._save_sgdb_key()
             self.e_pass.set_text("")
         return remote
+
+    def _save_sgdb_key(self):
+        """Store the SteamGridDB key as a 0600 keyfile -- NEVER in config.json, which is plain
+        text people paste into issues. A blank field leaves any existing key untouched."""
+        key = self.e_sgdb.get_text().strip()
+        if not key:
+            return
+        try:
+            path = os.path.expanduser("~/.config/loadout/steamgriddb.key")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(key + "\n")
+            os.chmod(path, 0o600)
+            self.e_sgdb.set_text("")
+        except OSError as ex:
+            self.prog.set_text("could not save the SteamGridDB key: %s" % ex)
 
     def test_nas(self):
         remote = self._apply_smb(persist=False)
@@ -1874,6 +2034,83 @@ class StoragePage(Gtk.Box):
                 bits.append("%d empty game folder%s" % (len(pcs), "" if len(pcs) == 1 else "s"))
             msg = ("Pruned " + " and ".join(bits) + ".") if bits else "Nothing empty to prune."
             GLib.idle_add(self._done, msg)
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---- policy the user can set without a text editor -------------------------------------
+    def _sync_policy_labels(self):
+        """Keep the two policy buttons showing the CURRENT setting, so the page states the
+        configuration rather than just offering to change it."""
+        try:
+            self.b_disk.set_label("Default disk: %s" % ("SD" if DEFAULT_DEST == "sd" else "Internal"))
+            off = str(_C.get("rom_sd", "")).strip().lower() in ("off", "none")
+            self.b_sd.set_label("SD card: %s" % ("off" if off else ("on" if ROM_SD else "none found")))
+        except Exception:
+            pass
+
+    def cycle_default_disk(self):
+        """Which disk a newly pulled game lands on by default. Per-game override stays on Start."""
+        new = "internal" if DEFAULT_DEST == "sd" else "sd"
+        save_config_value("default_target", new)
+        _C["default_target"] = new
+        globals()["DEFAULT_DEST"] = new if ROM_SD else "internal"
+        self._sync_policy_labels()
+        self.prog.set_text("Default disk is now %s. Takes effect for games picked from here on."
+                           % ("SD" if new == "sd" else "Internal"))
+
+    def toggle_sd(self):
+        """Turn the SD tier off (or back to auto-detect) without editing config.json. Needs a
+        rebuild to take effect, because the union's branches change."""
+        off = str(_C.get("rom_sd", "")).strip().lower() in ("off", "none")
+        val = "" if off else "off"
+        for key in ("rom_sd", "pc_sd"):
+            save_config_value(key, val)
+            _C[key] = val
+        self._sync_policy_labels()
+        self.prog.set_text("SD card %s. Press Rebuild union to apply."
+                           % ("re-enabled (auto-detect)" if off else "disabled"))
+
+    def diagnostics(self):
+        """Everything I would otherwise have to SSH in to look at: what is mounted, what the
+        services are doing, and the last thing that went wrong."""
+        if self.busy:
+            return
+        self.busy = True
+        self.prog.set_text("Collecting diagnostics…")
+
+        def work():
+            out = []
+            try:
+                svc = subprocess.run(
+                    ["systemctl", "--user", "is-active", "rclone-roms.service",
+                     "mergerfs-roms.service", "rclone-pc.service", "mergerfs-pc.service",
+                     "loadout-worker.service", "loadout-saves.service"],
+                    capture_output=True, text=True, timeout=15).stdout.split()
+                names = ["rclone-roms", "mergerfs-roms", "rclone-pc", "mergerfs-pc",
+                         "worker", "saves"]
+                out.append("  ".join("%s=%s" % (n, v) for n, v in zip(names, svc)))
+            except Exception as e:
+                out.append("services: %s" % e)
+            out.append("ROM union %s (%d systems)   PC union %s (%d)"
+                       % ("mounted" if _mount_responsive(ROM_UNION) else "NOT MOUNTED",
+                          len(_safe_listdir(ROM_UNION)),
+                          "mounted" if _mount_responsive(PC_UNION) else "NOT MOUNTED",
+                          len(_safe_listdir(PC_UNION))))
+            out.append("NAS: roms %s, pc %s" % ("up" if NAS_OK else "DOWN",
+                                                "up" if PC_NAS_OK else "DOWN"))
+            for label, path in (("worker", os.path.join(HOME, "loadout-worker.log")),
+                                ("saves", os.path.join(HOME, "deck-saves.log"))):
+                line = ""
+                try:
+                    with open(path) as f:
+                        bad = [l.strip() for l in f
+                               if "ERROR" in l or "FAILED" in l or "Traceback" in l]
+                    line = bad[-1][:150] if bad else "no errors logged"
+                except OSError:
+                    line = "no log yet"
+                out.append("%s: %s" % (label, line))
+            q = os.path.exists(QUEUE)
+            out.append("queue: %s" % ("work pending" if q else "empty"))
+            GLib.idle_add(self._done, "\n".join(out))
         threading.Thread(target=work, daemon=True).start()
 
     def open_nas_setup(self):
@@ -2009,7 +2246,7 @@ class App(Gtk.Window):
         self.focus_pane = "content"            # "sidebar" | "content": which pane the D-pad drives
         self.console_pages = {}
 
-        self.pc_page = Page(self, "No playable PC games installed yet.", steam_col=True)
+        self.pc_page = Page(self, _pc_empty_text(), steam_col=True)
         self.rom_page = Page(self, "No console collections found.")
         self.saves_page = SavesPage(self)
         self.storage_page = StoragePage(self)

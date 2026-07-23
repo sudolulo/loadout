@@ -23,7 +23,10 @@ bumpers jump straight between sections from anywhere. Two per-game toggles:
   copy is verified on the new disk before the old one is reclaimed, so an interrupted move never
   loses the game. Shortcuts point through the union, so moving disks never breaks them.
 
-Only **playable** games are listed — installers (un-installed PC repacks) are hidden.
+Only **playable** games are listed. Loadout works out what a PC game runs by **looking in its
+folder** (native Linux binary first, else the largest non-installer `.exe`), so a manifest is
+optional — and an un-installed repack, whose only executables are `setup.exe` and archive tools,
+stays hidden until it is installed.
 Rescan = **⧉ View**, Apply = **Y**, Close = **B**, sidebar = **D-pad ←/→** (bumpers **L1/R1**
 jump sections), disk = **Start** (keyboard: `d`).
 
@@ -79,7 +82,10 @@ Then, once: open **Storage → Set up NAS share…** to point Loadout at your NA
 `Loadout.AppImage` to Steam if you want it in Game Mode.
 
 ### NAS setup
-On the **Storage** page, **Set up NAS share…** takes your SMB **Host**, **Share/path**, and login,
+On the **Storage** page the SMB form takes **Host**, **ROM path**, **PC path**, **Saves path**, login,
+and (optionally) your **SteamGridDB key** — the key is written to a `0600` keyfile, never the config.
+The same page carries **Default disk**, **SD card on/off**, **Rebuild union**, **Prune empty** and
+**Diagnostics**, so nothing needs a terminal. Historically it took your SMB **Host**, **Share/path**, and login,
 **Test**s the connection, and on **Save** writes an *obscured* rclone remote to
 `~/.config/rclone/rclone.conf` (0600) plus the non-secret `remote:path` into `rom_rclone_remote`
 in the config — **your password never lands in Loadout's config** — then rebuilds the union.
