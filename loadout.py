@@ -16,6 +16,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib, Pango, GdkPixbuf
 
 import steamgriddb                       # optional SteamGridDB cover art (no-op without a key)
+import steam_shortcuts                    # native Steam shortcuts.vdf management (drop-SRM)
 
 HOME = os.path.expanduser("~")
 
@@ -156,6 +157,95 @@ def set_steam(system, sfile, on):
             os.symlink(os.path.join(ROM_UNION, system, sfile), link)
     elif os.path.lexists(link):
         os.remove(link)
+
+
+_ROM_EXT = (".iso", ".chd", ".zip", ".7z", ".nkit", ".wbfs", ".rvz", ".gcm", ".nsp", ".xci",
+            ".cso", ".pbp", ".gb", ".gbc", ".gba", ".nds", ".z64", ".n64", ".v64", ".sfc",
+            ".smc", ".nes", ".md", ".gen", ".sms", ".gg", ".pce", ".cue", ".m3u", ".gdi",
+            ".wux", ".wud", ".rpx", ".dol", ".bin", ".img", ".wad", ".3ds", ".cia")
+
+
+def _rom_appname(fn):
+    """Display name for a rom launch file: strip up to two known extensions (handles .nkit.iso)."""
+    n = fn
+    for _ in range(2):
+        base, ext = os.path.splitext(n)
+        if ext.lower() in _ROM_EXT:
+            n = base
+        else:
+            break
+    return n.strip()
+
+
+def sync_steam(dry_run=False):
+    """Reconcile Steam ROM shortcuts with the enabled set (SF_DIR symlinks), natively — no SRM.
+
+    Launch commands come from templates learned from the EXISTING shortcuts, so new shortcuts
+    launch identically. Dedups by ROM PATH (never by name), so it can neither duplicate nor
+    clobber an existing entry. Steam MUST be stopped for a real run. Returns (added, removed)
+    counts; with dry_run, the (add_list, remove_list) for inspection. Backs up + round-trip-guards."""
+    import re
+    users = steam_shortcuts.steam_users()
+    if not users:
+        return ([], []) if dry_run else (0, 0)
+    cfg = os.path.join(users[0], "config")
+    vdf = os.path.join(cfg, "shortcuts.vdf")
+    raw = open(vdf, "rb").read()
+    root = steam_shortcuts.loads(raw)
+    if steam_shortcuts.dumps(root) != raw:
+        raise RuntimeError("shortcuts.vdf round-trip mismatch — refusing to sync")
+    tmpls = steam_shortcuts.learn_templates(root)
+    ents = steam_shortcuts._entries(root)
+    rompat = re.compile(r'"([^"]*\.steam-shortcuts/([^/]+)/[^"]*)"')
+    existing = {}                          # rom_path -> index in ents
+    for i, (_idx, e) in enumerate(ents):
+        m = (rompat.search(str(steam_shortcuts._ci(e, "Exe")))
+             or rompat.search(str(steam_shortcuts._ci(e, "LaunchOptions"))))
+        if m:
+            existing[m.group(1)] = i
+    union_sf = os.path.join(ROM_UNION, ".steam-shortcuts")
+    present = set()                        # rom-paths whose symlink EXISTS (still "shown in Steam")
+    addable = {}                           # + whose target resolves -> can make a working shortcut
+    if os.path.isdir(SF_DIR):
+        for sysid in os.listdir(SF_DIR):
+            sd = os.path.join(SF_DIR, sysid)
+            if not os.path.isdir(sd):
+                continue
+            for fn in os.listdir(sd):
+                if fn.startswith("."):
+                    continue
+                rom = os.path.join(union_sf, sysid, fn)
+                present.add(rom)
+                if os.path.exists(os.path.join(sd, fn)):     # symlink target resolves
+                    addable[rom] = (sysid, _rom_appname(fn))
+    add = [(rom, s, n) for rom, (s, n) in addable.items() if rom not in existing and s in tmpls]
+    rem = [rom for rom in existing if rom not in present]     # only symlinks that are truly gone
+    if dry_run:
+        return add, rem
+    if not add and not rem:
+        return 0, 0
+    remidx = {existing[rom] for rom in rem}
+    kept = [ents[i] for i in range(len(ents)) if i not in remidx]
+    grid = os.path.join(cfg, "grid")
+    for rom, sysid, appname in add:
+        aid, pairs = steam_shortcuts.game_entry(appname, tmpls[sysid], rom)
+        kept.append(("", pairs))
+        cov = steamgriddb.cover(appname)
+        if cov:
+            steam_shortcuts.place_art(grid, aid, portrait=cov)
+    kept = [(str(i), e) for i, (_k, e) in enumerate(kept)]
+    for k in range(len(root)):
+        if root[k][0].lower() == "shortcuts":
+            root[k] = (root[k][0], kept)
+            break
+    shutil.copy2(vdf, vdf + ".loadout-bak")
+    tmp = vdf + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(steam_shortcuts.dumps(root))
+    os.replace(tmp, vdf)
+    return len(add), len(rem)
+
+
 QUEUE = os.path.join(HOME, ".loadout-queue.json")
 PROGRESS = os.path.join(HOME, ".loadout-progress.json")
 PC_UNION = _C["pc_union"]
@@ -1732,6 +1822,18 @@ class App(Gtk.Window):
 
 if __name__ == "__main__":
     import sys
+    if "--sync-steam-dry" in sys.argv:             # report what a native Steam sync would do
+        _add, _rem = sync_steam(dry_run=True)
+        print("would ADD %d shortcut(s), REMOVE %d" % (len(_add), len(_rem)))
+        for _rom, _sys, _name in _add[:25]:
+            print("  + [%s] %s" % (_sys, _name))
+        for _rom in _rem[:25]:
+            print("  - %s" % _rom)
+        raise SystemExit(0)
+    if "--sync-steam" in sys.argv:                 # native Steam sync (Steam must be stopped)
+        _a, _r = sync_steam()
+        print("synced Steam shortcuts: +%d, -%d" % (_a, _r))
+        raise SystemExit(0)
     if "--update" in sys.argv:                     # headless self-update (timer / manual)
         import loadout_update
         _info = loadout_update.check()

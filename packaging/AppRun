@@ -8,6 +8,8 @@ export PATH="$HOME/bin:$PATH"
 case "${1:-}" in
   --worker)  exec python3 "$APP/loadout-worker.py" ;;            # systemd user service
   --update)  exec python3 "$APP/loadout_update.py" ;;           # check + self-replace
+  --sync-steam|--sync-steam-dry) exec python3 "$APP/loadout.py" "$1" ;;  # native Steam sync
+  --refresh) shift; exec bash "$APP/steam-refresh.sh" "$@" ;;   # exit-time Steam refresh
   --install) shift; exec bash "$APP/install.sh" "$@" ;;         # full install (scripts+units+migrate)
   --help|-h) echo "Loadout.AppImage [--worker|--update|--install]"; exit 0 ;;
 esac
