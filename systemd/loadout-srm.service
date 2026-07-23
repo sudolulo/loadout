@@ -1,0 +1,6 @@
+[Unit]
+Description=Sync Loadout changes into Steam (SRM refresh)
+[Service]
+Type=oneshot
+TimeoutStartSec=1800
+ExecStart=/bin/bash %h/loadout-sync.sh

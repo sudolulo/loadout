@@ -1,9 +1,0 @@
-[Unit]
-Description=Watch for pending Offline Manager changes
-
-[Path]
-PathExists=%h/.offline-manager-dirty
-Unit=offline-manager-srm.service
-
-[Install]
-WantedBy=default.target

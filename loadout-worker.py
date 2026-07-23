@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Background copier for the Offline Manager.
+"""Background copier for the Loadout.
 
 The manager used to copy on a thread inside itself, so closing it killed the transfer
 and you had to sit and watch a 15GB game finish. This runs as a systemd user service
@@ -12,10 +12,10 @@ is reopened.
 import json, os, shutil, sys, time
 
 HOME = os.path.expanduser("~")
-QUEUE = os.path.join(HOME, ".offline-manager-queue.json")
-PROGRESS = os.path.join(HOME, ".offline-manager-progress.json")
-DIRTY = os.path.join(HOME, ".offline-manager-dirty")
-LOG = os.path.join(HOME, "offline-manager-worker.log")
+QUEUE = os.path.join(HOME, ".loadout-queue.json")
+PROGRESS = os.path.join(HOME, ".loadout-progress.json")
+DIRTY = os.path.join(HOME, ".loadout-dirty")
+LOG = os.path.join(HOME, "loadout-worker.log")
 
 
 def log(msg):

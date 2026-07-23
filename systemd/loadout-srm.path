@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for pending Loadout changes
+
+[Path]
+PathExists=%h/.loadout-dirty
+Unit=loadout-srm.service
+
+[Install]
+WantedBy=default.target

@@ -1,6 +1,0 @@
-[Unit]
-Description=Sync Offline Manager changes into Steam (SRM refresh)
-[Service]
-Type=oneshot
-TimeoutStartSec=1800
-ExecStart=/bin/bash %h/offline-sync.sh

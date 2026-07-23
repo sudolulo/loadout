@@ -1,0 +1,7 @@
+[Unit]
+Description=Watch for queued Loadout copies
+[Path]
+PathExists=%h/.loadout-queue.json
+Unit=loadout-worker.service
+[Install]
+WantedBy=default.target

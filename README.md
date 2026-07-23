@@ -1,10 +1,10 @@
-# offline-manager
+# Loadout
 
 The Steam Deck library manager — a gamepad-driven GUI plus the plumbing behind it:
 which games are kept **offline** on the Deck, which **show in Steam**, save sync to the NAS,
 and (for PC) automated installs.
 
-## The GUI — `offline-manager.py`
+## The GUI — `loadout.py`
 1280×800, fully drivable from the pad. Per-console tabs plus **PC Games**, **Collections**
 (whole-console ROM sets) and **Saves**. Two per-game toggles:
 
@@ -30,10 +30,10 @@ an `Emulation/roms(-local)` tree); set `rom_sd` in the config to force a path or
 it. All tier paths come from the same `config.json` the GUI reads, so setup and manager always
 agree. No SD is fine (Internal + NAS); no NAS is fine too (local-only union — see below).
 
-## SRM automation — `srm-refresh.sh`, `fix_collections.py`, `offline-sync.sh`
+## SRM automation — `srm-refresh.sh`, `fix_collections.py`, `loadout-sync.sh`
 Rebuild the Steam ROM Manager shortcuts + per-console collections without leaving Gaming Mode
 (works around SRM needing an X server while silently skipping categories when Steam is up).
-`offline-sync.sh` is a flag-watched systemd path unit that runs the refresh on Apply.
+`loadout-sync.sh` is a flag-watched systemd path unit that runs the refresh on Apply.
 
 ## Saves — `deck-saves.sh`, `deck-saves-daemon.sh`, `steam-account.py`
 Emulator saves synced to the NAS under the **signed-in Steam account**, so a profile resumes on
@@ -56,11 +56,11 @@ See `mount-setup.sh` / `ps3-esde-setup.sh` for the one-time host setup.
 
 Then:
 1. `mount-setup.sh` — provision the mergerfs/rclone union once (edit it for your NAS/remote).
-2. Add `offline-manager.py` to Steam as a non-Steam game (or launch it however you like).
+2. Add `loadout.py` to Steam as a non-Steam game (or launch it however you like).
 
 ### Configuration
-All paths live in `~/.config/offline-manager/config.json` (see `config.example.json`);
-`$OFFLINE_MANAGER_CONFIG` overrides the location. Defaults target a standard EmuDeck +
+All paths live in `~/.config/loadout/config.json` (see `config.example.json`);
+`$LOADOUT_CONFIG` overrides the location. Defaults target a standard EmuDeck +
 rclone-union layout. The save sync's rclone remote is set with `DECK_SAVES_REMOTE` /
 `DECK_SAVES_BASE` (default `games` / `games/Saves`); the ROM NAS remote for `mount-setup.sh` is
 `ROM_RCLONE_REMOTE` (default `games:roms`, `"off"` for local-only).

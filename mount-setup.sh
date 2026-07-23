@@ -1,12 +1,12 @@
 #!/bin/bash
 # Deck: rootless mergerfs union across up to three tiers -> the ROM union dir.
 #   INTERNAL (always)  +  SD card (optional, auto-detected)  +  NAS (optional, rclone RO)
-# All paths come from ~/.config/offline-manager/config.json -- the SAME file the GUI reads --
+# All paths come from ~/.config/loadout/config.json -- the SAME file the GUI reads --
 # so the union and the manager always agree on where the tiers are. Survives reboots via
 # systemd --user units.
 #
 # Env knobs:
-#   OFFLINE_MANAGER_CONFIG   override the config path
+#   LOADOUT_CONFIG   override the config path
 #   ROM_RCLONE_REMOTE        rclone remote:path for the NAS branch (default games:roms;
 #                            set to "off" for a NAS-less, local-only union)
 set -u
@@ -19,8 +19,8 @@ export XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/us
 # to point the SD tier somewhere fresh, set "rom_sd" in the config to an explicit path.
 eval "$(python3 - <<'PY'
 import json, os, glob
-CFG = os.path.expanduser(os.environ.get("OFFLINE_MANAGER_CONFIG",
-                                        "~/.config/offline-manager/config.json"))
+CFG = os.path.expanduser(os.environ.get("LOADOUT_CONFIG",
+                                        "~/.config/loadout/config.json"))
 D = {"rom_local": "~/Emulation/roms-local", "rom_sd": "",
      "rom_nas": "~/.cache/nas-roms", "rom_union": "~/Emulation/roms"}
 c = dict(D)

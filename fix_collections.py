@@ -68,9 +68,9 @@ for appid, name, blob in shortcuts:
     if m:
         console = m.group(1)
     elif "/Games-local/" in blob:
-        console = "pc"          # PC game launchers written by the Offline Manager
+        console = "pc"          # PC game launchers written by the Loadout
     elif "/Emulation/tools/manager/" in blob:
-        console = "tools"       # the Offline Manager itself
+        console = "tools"       # the Loadout itself
     if not console:
         continue
     by_console.setdefault(console, []).append(appid)

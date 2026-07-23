@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to ~/.config/offline-manager/config.json and edit for a non-default layout. All paths accept ~ .",
+  "_comment": "Copy to ~/.config/loadout/config.json and edit for a non-default layout. All paths accept ~ .",
   "rom_local":    "~/Emulation/roms-local",
   "_rom_sd": "SD-card ROM branch. \"\" = auto-detect the Deck SD; an explicit path forces it; \"off\" = internal + NAS only.",
   "rom_sd":       "",

@@ -2,6 +2,15 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.4.0] - 2026-07-23
+### Changed
+- **Renamed the project from `offline-manager` to Loadout.** Config lives at
+  `~/.config/loadout/config.json` (env `$LOADOUT_CONFIG`); systemd units are `loadout-worker.*`
+  and `loadout-srm.*`; scripts are `loadout.py` / `loadout-worker.py` / `loadout-sync.sh`.
+  `install.sh` migrates an existing `offline-manager` install (moves the config, removes the old
+  units and scripts). The *offline/local* game concept is unchanged — only the app name moved.
+- See `ROADMAP.md` for the path to a self-updating AppImage (M0–M5).
+
 ## [0.3.0] - 2026-07-23
 ### Added
 - Three-tier union: an optional **SD-card** branch between Internal and the NAS. The SD is
