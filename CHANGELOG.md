@@ -2,6 +2,13 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.7.3] - 2026-07-23
+### Fixed
+- The stale `offline-manager` / `Offline Manager` shortcut is now removed on the next refresh
+  **even when nothing else changed**. In 0.7.2 the removal only happened alongside a ROM
+  add/remove (the no-change early-return ran first), so on a library with no pending ROM
+  changes the old shortcut lingered. The refresh now writes whenever a stale shortcut is present.
+
 ## [0.7.2] - 2026-07-23
 ### Changed
 - **Loadout is now a true self-contained container.** Every helper script (the Steam refresh,

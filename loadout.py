@@ -227,15 +227,16 @@ def sync_steam(dry_run=False):
                     addable[rom] = (sysid, _rom_appname(fn))
     add = [(rom, s, n) for rom, (s, n) in addable.items() if rom not in existing and s in tmpls]
     rem = [rom for rom in existing if rom not in present]     # only symlinks that are truly gone
+    # also drop any stale offline-manager shortcut (Loadout's old name) that's lingering
+    _stale = ("offline-manager", "offline manager")
+    staleidx = {i for i in range(len(ents))
+                if str(steam_shortcuts._ci(ents[i][1], "AppName")).strip().lower() in _stale}
     if dry_run:
         return add, rem
-    if not add and not rem:
+    if not add and not rem and not staleidx:
         return 0, 0
-    remidx = {existing[rom] for rom in rem}
-    # also drop the stale offline-manager shortcut (Loadout's old name) if it's lingering
-    _stale = ("offline-manager", "offline manager")
-    kept = [ents[i] for i in range(len(ents)) if i not in remidx
-            and str(steam_shortcuts._ci(ents[i][1], "AppName")).strip().lower() not in _stale]
+    drop = {existing[rom] for rom in rem} | staleidx
+    kept = [ents[i] for i in range(len(ents)) if i not in drop]
     grid = os.path.join(cfg, "grid")
     for rom, sysid, appname in add:
         aid, pairs = steam_shortcuts.game_entry(appname, tmpls[sysid], rom)
@@ -253,7 +254,7 @@ def sync_steam(dry_run=False):
     with open(tmp, "wb") as f:
         f.write(steam_shortcuts.dumps(root))
     os.replace(tmp, vdf)
-    return len(add), len(rem)
+    return len(add), len(rem) + len(staleidx)
 
 
 QUEUE = os.path.join(HOME, ".loadout-queue.json")
