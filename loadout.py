@@ -332,8 +332,12 @@ def sync_steam(dry_run=False):
     kept = [ents[i] for i in range(len(ents)) if i not in drop]
     grid = os.path.join(cfg, "grid")
     added_aids = []
+    # a just-added game is stamped as played-now so the Deck's home "Recent" shelf shows it.
+    # That shelf reads the shortcut's own LastPlayTime; the localconfig stamp below is the
+    # desktop client's copy of the same idea, and both are written so either surface picks it up.
+    now = int(time.time()) if RECENT_ON else 0
     for rom, sysid, appname in add:
-        aid, pairs = steam_shortcuts.game_entry(appname, tmpls[sysid], rom)
+        aid, pairs = steam_shortcuts.game_entry(appname, tmpls[sysid], rom, last_play=now)
         kept.append(("", pairs))
         added_aids.append(aid)
         cov = steamgriddb.cover(appname)
@@ -383,6 +387,10 @@ list.nav.focused row:selected { background: #3b82f6; border-left: 3px solid #fbb
 .navhdr { font-size: 11pt; font-weight: bold; color: #6b7280; padding: 14px 6px 4px 6px; }
 .navitem { font-size: 15pt; }
 .hint { font-size: 13pt; color: #9aa0a6; }
+/* the pad's cursor on a settings field. It's a PAINTED cue, not real keyboard focus:
+   focusing a text entry in Game Mode pops Steam's on-screen keyboard, so merely walking
+   past a field must never do it (A on the field is what opens the keyboard). */
+.padsel { border: 3px solid #fbbf24; border-radius: 8px; }
 .big { font-size: 20pt; font-weight: bold; }
 .confirm { font-size: 19pt; font-weight: bold; color: #0b0d10; background: #fbbf24;
            padding: 16px; border-radius: 10px; }
@@ -1522,8 +1530,36 @@ class StoragePage(Gtk.Box):
         self.highlight()
 
     def highlight(self):
-        if self.focusables:
-            self.focusables[self.focus].grab_focus()
+        """Show which field/button the pad is on WITHOUT focusing a text entry.
+
+        Focusing a Gtk.Entry in Game Mode makes Steam throw up its on-screen keyboard, so
+        doing it here meant just scrolling the sidebar onto this page opened the keyboard —
+        and dismissing that keyboard sent the app a B it read as "quit". The cursor is a
+        painted border instead; real keyboard focus only happens when A is pressed on a
+        field (toggle_current), which is when the keyboard is actually wanted."""
+        if not self.focusables:
+            return
+        for i, w in enumerate(self.focusables):
+            ctx = w.get_style_context()
+            (ctx.add_class if i == self.focus else ctx.remove_class)("padsel")
+        w = self.focusables[self.focus]
+        if isinstance(w, Gtk.Button):
+            w.grab_focus()          # buttons are safe: no keyboard, and it reads as focus
+        else:
+            self.defocus_entry()    # park focus off any entry so the keyboard closes
+
+    def defocus_entry(self):
+        """Take keyboard focus off a text field (closing the on-screen keyboard) by parking
+        it on the page itself, which accepts focus but types nothing."""
+        try:
+            self.set_can_focus(True)
+            self.grab_focus()
+        except Exception:
+            pass
+
+    def entry_focused(self):
+        """Is a text field currently holding real keyboard focus (keyboard likely open)?"""
+        return any(isinstance(w, Gtk.Entry) and w.has_focus() for w in self.focusables)
 
     def toggle_current(self, *_):
         """A on a button presses it; A on a text field focuses it so the Deck's on-screen
@@ -1860,7 +1896,7 @@ class App(Gtk.Window):
         hint = Gtk.Label(xalign=0)
         _disk = "    •    Start = disk (SD/Internal)" if HAVE_SD else ""
         hint.set_text("D-pad = move    •    L1/R1 = switch section    •    A = keep Offline    •    "
-                      "X = show in Steam" + _disk + "    •    Y = apply    •    B = close")
+                      "X = show in Steam" + _disk + "    •    Y = apply    •    B = back")
         hint.get_style_context().add_class("hint")
         outer.pack_start(hint, False, False, 0)
 
@@ -1915,6 +1951,24 @@ class App(Gtk.Window):
             ok, msg = loadout_update.apply(info)
             GLib.idle_add(self.show_banner, msg, "confirm" if ok else "error")
         threading.Thread(target=work, daemon=True).start()
+
+    def go_back(self):
+        """B = back out one step, and only quit from the outermost one.
+
+        B used to quit outright wherever you were. On the Deck that made dismissing the
+        on-screen keyboard (which is itself a B press) close the whole app. Now B unwinds:
+        banner -> on-screen keyboard -> content pane -> quit."""
+        if self.banner.get_visible():
+            self.hide_banner()
+            return
+        pg = self.page()
+        if getattr(pg, "entry_focused", None) and pg.entry_focused():
+            pg.defocus_entry()             # close the keyboard, stay in the app
+            return
+        if self.focus_pane == "content":
+            self.set_pane("sidebar")       # back out to the section list
+            return
+        self.quit_app()
 
     def quit_app(self):
         # Copying happens in a systemd service now, so closing here never cancels it.
@@ -1980,10 +2034,7 @@ class App(Gtk.Window):
             else:
                 self.page().toggle_current(0)
         elif name == "b":
-            if self.banner.get_visible():
-                self.hide_banner()
-            else:
-                self.quit_app()
+            self.go_back()
         elif name == "x":
             self.toggle_steam_current()
         elif name == "y":
@@ -2199,10 +2250,7 @@ class App(Gtk.Window):
         if k in ("F5",):
             self.reload(); return True
         if k in ("Escape", "b", "B"):
-            if self.banner.get_visible():
-                self.hide_banner()
-            else:
-                self.quit_app()
+            self.go_back()
             return True
         # L1/R1 commonly arrive as these
         if k in ("Page_Up", "bracketleft", "l", "L"):

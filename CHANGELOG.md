@@ -2,6 +2,20 @@
 
 Notable changes (Keep a Changelog format, SemVer).
 
+## [0.11.3] - 2026-07-23
+### Fixed
+- **Scrolling the sidebar onto Storage popped the on-screen keyboard, and dismissing that
+  keyboard closed the app.** The settings panel moved its cursor by taking real keyboard focus,
+  and focusing a text field in Game Mode is what makes Steam raise its keyboard — so just
+  previewing the page opened it. The cursor is a painted border now; a field only takes focus
+  when you press A on it, which is when the keyboard is actually wanted.
+- **B no longer quits from wherever you are.** It unwinds one step at a time — banner, then
+  on-screen keyboard, then back to the section list — and only exits from the sidebar. Dismissing
+  the Deck's keyboard is itself a B press, which is why it was closing the whole app.
+- **Newly added games now appear on the Deck's Recent shelf.** That shelf sorts non-Steam
+  shortcuts by the shortcut's own `LastPlayTime`, which Loadout always wrote as `0`; the
+  `localconfig.vdf` stamp added in 0.8.2 was the wrong surface on its own. Both are written now.
+
 ## [0.11.2] - 2026-07-23
 ### Changed
 - **The SD card now mirrors the Deck's own layout**: `<card>/Emulation/ROMs` for the ROM library

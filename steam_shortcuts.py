@@ -222,7 +222,7 @@ def templates(root, home=None):
     return t
 
 
-def _entry_pairs(appname, exe, start_dir, lo, icon, tags):
+def _entry_pairs(appname, exe, start_dir, lo, icon, tags, last_play=0):
     aid = app_id(exe, appname)
     return aid, [
         ("appid", struct.unpack("<i", struct.pack("<I", aid))[0]),
@@ -230,18 +230,22 @@ def _entry_pairs(appname, exe, start_dir, lo, icon, tags):
         ("icon", icon), ("ShortcutPath", ""), ("LaunchOptions", lo),
         ("IsHidden", 0), ("AllowDesktopConfig", 1), ("AllowOverlay", 1),
         ("OpenVR", 0), ("Devkit", 0), ("DevkitGameID", ""), ("DevkitOverrideAppID", 0),
-        ("LastPlayTime", 0),
+        # Steam's "Recent" shelf sorts non-Steam shortcuts by THIS field, not by anything
+        # in localconfig.vdf. Left at 0, a freshly added game never surfaces on the
+        # Deck's home screen.
+        ("LastPlayTime", last_play),
         ("tags", [(str(i), t) for i, t in enumerate(tags)]),
     ]
 
 
-def game_entry(appname, tmpl, rom_path, icon=""):
+def game_entry(appname, tmpl, rom_path, icon="", last_play=0):
     """Build a Steam shortcut entry for a game from a learned template + its rom symlink path.
-    Returns (app_id, entry_pairs)."""
+    Returns (app_id, entry_pairs). `last_play` stamps the shortcut as just-played so a freshly
+    added game shows up on the Deck's Recent shelf."""
     exe = tmpl["exe"].replace("{ROM}", rom_path)
     lo = tmpl["lo"].replace("{ROM}", rom_path)
     return _entry_pairs(appname, exe, tmpl["start_dir"], lo, icon,
-                        [tmpl["tag"]] if tmpl.get("tag") else [])
+                        [tmpl["tag"]] if tmpl.get("tag") else [], last_play)
 
 
 def place_art(grid_dir, aid, portrait=None, hero=None, logo=None, landscape=None, icon=None):
