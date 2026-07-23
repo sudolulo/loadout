@@ -64,15 +64,21 @@ cd "$ROOT"
 if [ -n "$(git status --porcelain)" ]; then
   echo "   ABORT: working tree is dirty - commit first so the tag matches what ships"; exit 1
 fi
-git tag -f "$TAG" >/dev/null 2>&1
 git push origin "$(git rev-parse --abbrev-ref HEAD)" 2>&1 | grep -viE 'pseudo|permanently added' | tail -1 || true
-git push -f origin "$TAG" 2>&1 | grep -viE 'pseudo|permanently added' | tail -1
+# The TAG is deliberately NOT pushed here. Gitea records a pushed tag as a release row, and a
+# later "create release" for the same tag then fails with a duplicate-key error -- so the tag is
+# created BY the release call instead, from the commit being released.
+SHA="$(git rev-parse HEAD)"
+git push -q origin ":refs/tags/$TAG" >/dev/null 2>&1 || true   # clear a stale bare tag
+git tag -f "$TAG" >/dev/null 2>&1
 
 echo "== publish release =="
 umask 077
 printf 'Authorization: token %s\n' "$(rbw get 'gitea token')" > "$WORK/auth.hdr"
+# draft:false is explicit -- a draft release is invisible to /releases/latest, which is the only
+# thing the Decks look at, so a silent draft means nobody ever gets the update.
 rel=$(curl -sS -X POST -H @"$WORK/auth.hdr" -H 'Content-Type: application/json' \
-  -d "{\"tag_name\":\"$TAG\",\"name\":\"Loadout $VERSION\",\"body\":\"Self-updating AppImage. See CHANGELOG.md.\"}" \
+  -d "{\"tag_name\":\"$TAG\",\"target_commitish\":\"$SHA\",\"draft\":false,\"prerelease\":false,\"name\":\"Loadout $VERSION\",\"body\":\"Self-updating AppImage. See CHANGELOG.md.\"}" \
   "$API/repos/$REPO/releases")
 id=$(printf '%s' "$rel" | python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
 [ -n "$id" ] || { echo "   release create failed: $(printf '%s' "$rel" | head -c 200)"; exit 1; }
@@ -83,5 +89,7 @@ done
 
 echo "== verify (anonymous, the way a Deck sees it) =="
 sleep 3
-curl -sS "$API/repos/$REPO/releases/latest" | python3 -c \
-  "import sys,json;d=json.load(sys.stdin);print('   latest:',d['tag_name'],[a['name'] for a in d.get('assets',[])])"
+got=$(curl -sS "$API/repos/$REPO/releases/latest" | python3 -c \
+  "import sys,json;d=json.load(sys.stdin);print(d['tag_name'],[a['name'] for a in d.get('assets',[])])")
+echo "   latest: $got"
+case "$got" in "$TAG"*) ;; *) echo "   WARNING: /releases/latest is not $TAG - the Decks will not see this build" ;; esac
