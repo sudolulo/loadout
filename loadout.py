@@ -1127,7 +1127,12 @@ def scan():
                 continue
             runnable = (n in manifest_says) and not (n in manifest_denies)
             if not runnable and n not in manifest_denies:
-                runnable = bool(detect_entry(os.path.join(base, n)))
+                # Detect against the UNION, not this one tier: a game is often a stub on the NAS
+                # and a full install locally (or vice versa), and the union is what actually runs.
+                where = os.path.join(PC_UNION, n)
+                if not os.path.isdir(where):
+                    where = os.path.join(base, n)
+                runnable = bool(detect_entry(where))
             seen.add(n)
             # A repack that has not been built yet is SHOWN, not hidden: otherwise a game you
             # know you have simply is not there, and "missing" looks identical to "not built".
