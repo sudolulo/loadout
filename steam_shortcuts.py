@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Read/write Steam's non-Steam-games file (shortcuts.vdf, Valve binary KeyValues) and its
+library artwork. Loadout uses this to register itself (and, later, the ROMs you pick) in
+Steam natively -- no Steam ROM Manager required.
+
+SAFETY: this file holds ALL of a user's non-Steam shortcuts. The parser/serializer round-trip
+byte-for-byte (verify with `python steam_shortcuts.py <shortcuts.vdf>`); string values are kept
+as raw bytes (latin-1) so nothing is lost. Every write goes through `add_shortcut`, which backs
+the file up first, refuses to run if the round-trip guard fails, and never drops existing entries.
+"""
+import binascii
+import glob
+import os
+import shutil
+import struct
+
+# Binary VDF tags: 0x00 nested map, 0x01 string, 0x02 int32(LE), 0x08 ends a map.
+
+
+def _read_str(buf, i):
+    j = buf.index(b"\x00", i)
+    return buf[i:j].decode("latin-1"), j + 1        # latin-1 == byte-exact round-trip
+
+
+def _parse_map(buf, i):
+    """Parse a map's children starting at i; return (list_of_(key,value), next_index)."""
+    out = []
+    while True:
+        t = buf[i]
+        i += 1
+        if t == 0x08:
+            return out, i
+        key, i = _read_str(buf, i)
+        if t == 0x00:
+            val, i = _parse_map(buf, i)
+        elif t == 0x01:
+            val, i = _read_str(buf, i)
+        elif t == 0x02:
+            val = struct.unpack_from("<i", buf, i)[0]
+            i += 4
+        else:
+            raise ValueError("unknown VDF tag 0x%02x at %d" % (t, i - 1))
+        out.append((key, val))
+
+
+def _dump_map(pairs):
+    out = bytearray()
+    for key, val in pairs:
+        kb = key.encode("latin-1")
+        if isinstance(val, list):
+            out += b"\x00" + kb + b"\x00" + _dump_map(val) + b"\x08"
+        elif isinstance(val, bool):
+            out += b"\x02" + kb + b"\x00" + struct.pack("<i", int(val))
+        elif isinstance(val, int):
+            out += b"\x02" + kb + b"\x00" + struct.pack("<i", val)
+        else:
+            out += b"\x01" + kb + b"\x00" + str(val).encode("latin-1") + b"\x00"
+    return bytes(out)
+
+
+def loads(buf):
+    """Parse shortcuts.vdf -> root pairs, i.e. [("shortcuts", [(index, entry_pairs), ...])]."""
+    root, _ = _parse_map(buf, 0)
+    return root
+
+
+def dumps(root):
+    return _dump_map(root) + b"\x08"                # + the document-terminating 0x08
+
+
+# --- shortcut app id (what the grid artwork files are named after) ------------------------
+def app_id(exe, appname):
+    return binascii.crc32((exe + appname).encode("utf-8")) & 0xFFFFFFFF | 0x80000000
+
+
+def _entries(root):
+    for k, v in root:
+        if k.lower() == "shortcuts":
+            return v
+    return []
+
+
+def get(root, appname):
+    for _idx, entry in _entries(root):
+        for k, v in entry:
+            if k.lower() == "appname" and v == appname:
+                return entry
+    return None
+
+
+def add_shortcut(vdf_path, appname, exe, start_dir, icon="", tags=None):
+    """Add a non-Steam shortcut IF absent. Backs up shortcuts.vdf, refuses on a round-trip
+    mismatch, preserves every existing entry. Returns (app_id, changed). Steam must be stopped
+    for the write to stick (it rewrites the file on exit)."""
+    if os.path.exists(vdf_path):
+        raw = open(vdf_path, "rb").read()
+        root = loads(raw)
+        if dumps(root) != raw:
+            raise RuntimeError("shortcuts.vdf round-trip mismatch — refusing to write")
+    else:
+        raw, root = None, [("shortcuts", [])]
+    if get(root, appname):
+        return app_id(exe, appname), False
+    aid = app_id(exe, appname)
+    lst = _entries(root)
+    entry = [
+        ("appid", struct.unpack("<i", struct.pack("<I", aid))[0]),
+        ("AppName", appname), ("Exe", exe), ("StartDir", start_dir),
+        ("icon", icon), ("ShortcutPath", ""), ("LaunchOptions", ""),
+        ("IsHidden", 0), ("AllowDesktopConfig", 1), ("AllowOverlay", 1),
+        ("OpenVR", 0), ("Devkit", 0), ("DevkitGameID", ""), ("DevkitOverrideAppID", 0),
+        ("LastPlayTime", 0),
+        ("tags", [(str(i), t) for i, t in enumerate(tags or [])]),
+    ]
+    lst.append((str(len(lst)), entry))
+    if raw is not None:
+        shutil.copy2(vdf_path, vdf_path + ".loadout-bak")
+    tmp = vdf_path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(dumps(root))
+    os.replace(tmp, vdf_path)
+    return aid, True
+
+
+def place_art(grid_dir, aid, portrait=None, hero=None, logo=None, landscape=None, icon=None):
+    """Drop library art for `aid` into userdata/<id>/config/grid/. Safe (files only)."""
+    os.makedirs(grid_dir, exist_ok=True)
+    for src, dst in ((portrait, "%dp.png" % aid), (hero, "%d_hero.png" % aid),
+                     (logo, "%d_logo.png" % aid), (landscape, "%d.png" % aid),
+                     (icon, "%d_icon.png" % aid)):
+        if src and os.path.exists(src):
+            shutil.copy2(src, os.path.join(grid_dir, dst))
+
+
+def steam_users(home=None):
+    home = home or os.path.expanduser("~")
+    base = os.path.join(home, ".local/share/Steam/userdata")
+    if not os.path.isdir(base):
+        base = os.path.join(home, ".steam/steam/userdata")
+    return [d for d in glob.glob(os.path.join(base, "*")) if os.path.isdir(d) and
+            os.path.basename(d).isdigit() and os.path.basename(d) != "0"]
+
+
+if __name__ == "__main__":                # round-trip verifier: proves we won't corrupt it
+    import sys
+    raw = open(sys.argv[1], "rb").read()
+    root = loads(raw)
+    ok = dumps(root) == raw
+    names = [v.encode("latin-1").decode("utf-8", "replace")
+             for _i, e in _entries(root) for k, v in e if k.lower() == "appname"]
+    print("round-trip byte-exact:", ok)
+    print("shortcuts:", len(_entries(root)))
+    print("names:", ", ".join(names[:12]) + (" …" if len(names) > 12 else ""))
+    print("loadout present:", any(n == "Loadout" for n in names))
+    sys.exit(0 if ok else 1)
