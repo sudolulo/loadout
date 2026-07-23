@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy to ~/.config/offline-manager/config.json and edit for a non-default layout. All paths accept ~ .",
+  "rom_local":    "~/Emulation/roms-local",
+  "rom_nas":      "~/.cache/nas-roms",
+  "rom_union":    "~/Emulation/roms",
+  "pc_local":     "~/Games-local",
+  "pc_nas":       "~/.cache/nas-pc",
+  "pc_union":     "~/Games",
+  "pc_manifest":  "~/Games/.manifest.json",
+  "srm_appimage": "~/Emulation/tools/Steam-ROM-Manager.AppImage",
+  "saves_script": "~/deck-saves.sh"
+}

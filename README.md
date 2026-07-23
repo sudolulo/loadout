@@ -38,3 +38,23 @@ interception proxy, emitting a Proton-wrapped launcher for the installed Windows
 ## Deploy
 Copy the scripts to `~` on each Deck and the `systemd/` units to `~/.config/systemd/user/`.
 See `mount-setup.sh` / `ps3-esde-setup.sh` for the one-time host setup.
+
+## Install (shippable)
+
+```bash
+./install.sh              # scripts + systemd --user units + a default config
+```
+
+Then:
+1. `mount-setup.sh` — provision the mergerfs/rclone union once (edit it for your NAS/remote).
+2. Add `offline-manager.py` to Steam as a non-Steam game (or launch it however you like).
+
+### Configuration
+All paths live in `~/.config/offline-manager/config.json` (see `config.example.json`);
+`$OFFLINE_MANAGER_CONFIG` overrides the location. Defaults target a standard EmuDeck +
+rclone-union layout. The save sync's rclone remote is set with `DECK_SAVES_REMOTE` /
+`DECK_SAVES_BASE` (default `games` / `games/Saves`).
+
+### Without a NAS
+The manager degrades gracefully: with no rclone mount it simply shows what's local and the
+"NAS" side is empty — nothing crashes, nothing is lost (the NAS copy is never touched).

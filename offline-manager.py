@@ -16,13 +16,44 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib, Pango
 
 HOME = os.path.expanduser("~")
-ROM_LOCAL = os.path.join(HOME, "Emulation/roms-local")
-ROM_NAS = os.path.join(HOME, ".cache/nas-roms")
-PC_LOCAL = os.path.join(HOME, "Games-local")
-PC_NAS = os.path.join(HOME, ".cache/nas-pc")
-PC_MANIFEST = os.path.join(HOME, "Games/.manifest.json")
+
+# --- configuration -------------------------------------------------------------
+# Everything the manager touches is a path, and every path is overridable. Defaults
+# match a standard EmuDeck + rclone-union layout; drop a JSON at the config path (or set
+# $OFFLINE_MANAGER_CONFIG) to point it at a different setup. Nothing else is hardcoded.
+_DEFAULTS = {
+    "rom_local":   "~/Emulation/roms-local",   # writable local ROM branch of the union
+    "rom_nas":     "~/.cache/nas-roms",         # read-only NAS branch (rclone mount)
+    "rom_union":   "~/Emulation/roms",          # the mergerfs union ES-DE/SRM read
+    "pc_local":    "~/Games-local",
+    "pc_nas":      "~/.cache/nas-pc",
+    "pc_union":    "~/Games",
+    "pc_manifest": "~/Games/.manifest.json",
+    "srm_appimage": "~/Emulation/tools/Steam-ROM-Manager.AppImage",
+    "saves_script": "~/deck-saves.sh",
+}
+CONFIG_PATH = os.path.expanduser(
+    os.environ.get("OFFLINE_MANAGER_CONFIG", "~/.config/offline-manager/config.json"))
+
+
+def _load_config():
+    cfg = dict(_DEFAULTS)
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg.update({k: v for k, v in json.load(f).items() if k in _DEFAULTS})
+    except Exception:
+        pass
+    return {k: os.path.expanduser(v) for k, v in cfg.items()}
+
+
+_C = _load_config()
+ROM_LOCAL = _C["rom_local"]
+ROM_NAS = _C["rom_nas"]
+PC_LOCAL = _C["pc_local"]
+PC_NAS = _C["pc_nas"]
+PC_MANIFEST = _C["pc_manifest"]
 SF_DIR = os.path.join(ROM_LOCAL, ".steam-shortcuts")   # deck-writable Steam pick set
-ROM_UNION = os.path.join(HOME, "Emulation", "roms")
+ROM_UNION = _C["rom_union"]
 _STEAM_EXT = (".m3u", ".cue", ".gdi", ".chd", ".iso", ".nkit.iso", ".rvz", ".gcm",
               ".wbfs", ".nsp", ".xci", ".cso", ".pbp", ".gb", ".gbc", ".gba", ".nds",
               ".z64", ".sfc", ".smc", ".nes", ".md", ".sms", ".gg", ".pce")
@@ -52,8 +83,9 @@ def set_steam(system, sfile, on):
         os.remove(link)
 QUEUE = os.path.join(HOME, ".offline-manager-queue.json")
 PROGRESS = os.path.join(HOME, ".offline-manager-progress.json")
-PC_UNION = os.path.join(HOME, "Games")
-SRM = os.path.join(HOME, "Emulation/tools/Steam-ROM-Manager.AppImage")
+PC_UNION = _C["pc_union"]
+SRM = _C["srm_appimage"]
+SAVES_SCRIPT = _C["saves_script"]
 SKIP = ("media", "metadata.txt", "systeminfo.txt")
 
 CSS = b"""
@@ -699,7 +731,7 @@ class SavesPage(Gtk.Box):
     def refresh(self):
         import subprocess
         try:
-            out = subprocess.run(["bash", os.path.expanduser("~/deck-saves.sh"), "status"],
+            out = subprocess.run(["bash", SAVES_SCRIPT, "status"],
                                  capture_output=True, text=True, timeout=90).stdout
             kv = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
         except Exception:
@@ -747,7 +779,7 @@ class SavesPage(Gtk.Box):
         def work():
             import subprocess
             try:
-                r = subprocess.run(["bash", os.path.expanduser("~/deck-saves.sh"), action],
+                r = subprocess.run(["bash", SAVES_SCRIPT, action],
                                    capture_output=True, text=True, timeout=3600)
                 msg = (r.stdout or r.stderr or "").strip().splitlines()
                 msg = msg[-1] if msg else "done"

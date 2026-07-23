@@ -11,7 +11,9 @@
 #             newer AND this Deck has nothing unpushed. Refuses on conflict.
 #   status    machine-readable state for the manager GUI
 set -u
-RC="$HOME/bin/rclone"
+RC="${RCLONE_BIN:-$HOME/bin/rclone}"
+RCLONE_REMOTE="${DECK_SAVES_REMOTE:-games}"       # rclone remote name (rclone config)
+SAVES_BASE="${DECK_SAVES_BASE:-games/Saves}"      # path within that remote
 STATE="$HOME/.deck-saves"; mkdir -p "$STATE"
 CURFILE="$STATE/current-account"     # whose saves are sitting in ~/Emulation right now
 FLAGS="--transfers=8 --checkers=8 --fast-list"
@@ -22,7 +24,7 @@ declare -A SRC=( [saves]="$HOME/Emulation/saves" [storage]="$HOME/Emulation/stor
 ACCT="${DECK_SAVES_ACCT:-$(python3 "$HOME/steam-account.py" 2>/dev/null)}"
 [ -n "${ACCT:-}" ] || { echo "ERR cannot determine the signed-in Steam account"; exit 1; }
 
-remote()   { echo "games:games/Saves/$1"; }
+remote()   { echo "$RCLONE_REMOTE:$SAVES_BASE/$1"; }
 mark()     { echo "$STATE/synced-$1"; }
 conflict() { echo "$STATE/conflict-$1"; }
 nas_ts()   { "$RC" cat "$(remote "$1")/.last-backup" 2>/dev/null | head -1 | cut -f1; }
