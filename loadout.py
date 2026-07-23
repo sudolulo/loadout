@@ -17,7 +17,6 @@ from gi.repository import Gtk, Gdk, GLib, Pango, GdkPixbuf
 
 import steamgriddb                       # optional SteamGridDB cover art (no-op without a key)
 import steam_shortcuts                    # native Steam shortcuts.vdf management (drop-SRM)
-import steam_recent                       # stamp LastPlayed so new games hit the Recent shelf
 import steam_compat                       # point Windows shortcuts at Proton the way Steam does
 import nas_setup                          # in-app SMB share setup (obscured rclone remote)
 
@@ -82,16 +81,6 @@ _DEFAULTS = {
     "rom_union":   "~/Emulation/roms",          # the mergerfs union ES-DE/SRM read
     "default_target": "sd",                     # initial per-game disk when an SD exists
                                                 #   ("sd" or "internal"); overridable per game
-    "recent_days": 14,                          # a game added within this many days counts as
-                                                #   "recent" and is surfaced on the Deck's home
-                                                #   shelf using the time you actually added it;
-                                                #   0 disables the backfill (new adds still stamp)
-    "recent_max": 10,                           # at most this many are backfilled, newest first.
-                                                #   A bulk import shares one timestamp, and
-                                                #   surfacing 200 games at once buries the ones
-                                                #   you actually just added.
-    "recent_on_add": True,                      # stamp newly-added games as just-played so they
-                                                #   appear on the Deck's home "Recent games" shelf
     # PC mirrors the Emulation layout exactly: a parent dir holding the UNION you browse plus the
     # hidden tiers that feed it.  ~/Games/PC  <-  .pc-local + .pc-sd + .pc-nas
     "pc_local":    "~/Games/.pc-local",         # writable INTERNAL PC branch (hidden)
@@ -217,15 +206,6 @@ ROM_UNION = _C["rom_union"]
 ROM_TARGET = ROM_SD if DEFAULT_DEST == "sd" else ROM_LOCAL   # filesystem the disk gauge tracks
 COVERS_ON = steamgriddb.enabled()                           # show game cover art (needs a key)
 COVER_W, COVER_H = 46, 69                                    # in-list thumbnail size (2:3)
-RECENT_ON = bool(_C["recent_on_add"])                       # surface new games on the Recent shelf
-try:
-    RECENT_DAYS = float(_C.get("recent_days", 14) or 0)
-except (TypeError, ValueError):
-    RECENT_DAYS = 14.0
-try:
-    RECENT_MAX = int(_C.get("recent_max", 10) or 0)
-except (TypeError, ValueError):
-    RECENT_MAX = 10
 # Probe the NAS mount ONCE. A wedged rclone/FUSE mount hangs EVERY access (listdir/stat/walk) in an
 # uninterruptible wait, so if it's unresponsive we treat the NAS as absent for the whole session and
 # never touch it again — Loadout still runs on local games (rebuild the union or relaunch once the
@@ -416,45 +396,19 @@ def sync_steam(dry_run=False):
     # pretending everything was just played. Only ever fills in a ZERO, so a real play time (or
     # one Steam wrote) is never overwritten. Computed here, before the "nothing to do" return,
     # because in the steady state there is nothing to add and this would otherwise never run.
-    backfill = {}
-    if RECENT_ON and RECENT_DAYS > 0:
-        cutoff = time.time() - RECENT_DAYS * 86400
-        for _idx, e in ents:
-            try:
-                if steam_shortcuts._ci(e, "LastPlayTime"):
-                    continue
-                aid = steam_shortcuts._ci(e, "appid") & 0xFFFFFFFF
-                m = re.search(r'\.steam-shortcuts/([^/]+)/(.+?)"?$',
-                              str(steam_shortcuts._ci(e, "Exe")).strip('"'))
-                if m:
-                    src = os.path.join(SF_DIR, m.group(1), m.group(2))
-                else:
-                    name = next((n for n, v in record.items() if v == aid), None)
-                    src = pc_pick(name) if name else None
-                if not src or not os.path.lexists(src):
-                    continue
-                added = os.lstat(src).st_mtime
-                if added >= cutoff:
-                    backfill[aid] = int(added)
-            except Exception:
-                pass
-        if RECENT_MAX and len(backfill) > RECENT_MAX:
-            # newest first, appid as a stable tie-break: a bulk import shares one mtime, so
-            # without a cap every game in it would land on the shelf at once
-            keep = sorted(backfill.items(), key=lambda kv: (-kv[1], kv[0]))[:RECENT_MAX]
-            backfill = dict(keep)
     if dry_run:
         return add + [(e, "pc", n) for n, e, _k in pc_add], rem + sorted(pc_drop)
-    if not add and not rem and not staleidx and not pc_add and not pc_dropidx and not backfill:
+    if not add and not rem and not staleidx and not pc_add and not pc_dropidx:
         return 0, 0
     drop = {existing[rom] for rom in rem} | staleidx | pc_dropidx
     kept = [ents[i] for i in range(len(ents)) if i not in drop]
     grid = os.path.join(cfg, "grid")
     added_aids = []
-    # a just-added game is stamped as played-now so the Deck's home "Recent" shelf shows it.
-    # That shelf reads the shortcut's own LastPlayTime; the localconfig stamp below is the
-    # desktop client's copy of the same idea, and both are written so either surface picks it up.
-    now = int(time.time()) if RECENT_ON else 0
+    # Deliberately NOT stamping a play time. Measured on a Deck: a genuinely played non-Steam
+    # game has LastPlayTime set and NO localconfig LastPlayed, yet appears on the home shelf;
+    # games given both fields by hand never appeared. The shelf is built from Steam's own play
+    # sessions, so writing timestamps only invents play history and corrupts "sort by last played".
+    now = 0
     for rom, sysid, appname in add:
         aid, pairs = steam_shortcuts.game_entry(appname, tmpls[sysid], rom, last_play=now)
         kept.append(("", pairs))
@@ -481,14 +435,6 @@ def sync_steam(dry_run=False):
     for n in [n for n in record if n not in picks]:
         record.pop(n, None)
     pc_record(record)
-    for _k, e in kept:                       # apply the backfill to the entries that survive
-        aid = steam_shortcuts._ci(e, "appid") & 0xFFFFFFFF
-        if aid in backfill:
-            for i, (kk, _vv) in enumerate(e):
-                if kk.lower() == "lastplaytime":
-                    e[i] = (kk, backfill[aid])
-                    added_aids.append(aid)
-                    break
     kept = [(str(i), e) for i, (_k, e) in enumerate(kept)]
     for k in range(len(root)):
         if root[k][0].lower() == "shortcuts":
@@ -499,13 +445,6 @@ def sync_steam(dry_run=False):
     with open(tmp, "wb") as f:
         f.write(steam_shortcuts.dumps(root))
     os.replace(tmp, vdf)
-    # stamp just-added games as recently played so they surface on the Deck's home shelf. Steam is
-    # stopped here (this runs inside the refresh), which is exactly when localconfig.vdf is writable.
-    if RECENT_ON and added_aids:
-        try:
-            steam_recent.stamp_recent(added_aids, home=HOME)
-        except Exception:
-            pass
     return len(add) + len(pc_add), len(rem) + len(staleidx) + len(pc_dropidx)
 
 
