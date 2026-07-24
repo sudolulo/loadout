@@ -65,6 +65,20 @@ def _save_ids(m):
         pass
 
 
+def cached_cover(name):
+    """The cached cover for `name` if we already have one, WITHOUT any network lookup. Used when
+    refreshing art for titles that are already in Steam: that must not turn into hundreds of
+    searches."""
+    if not enabled():
+        return None
+    q = _clean(name)
+    gid = _load_ids().get(q) if q else None
+    if not gid:
+        return None
+    png = os.path.join(CACHE, "%d.png" % gid)
+    return png if os.path.exists(png) else None
+
+
 def cover(name):
     """Path to a cached 600x900 cover for `name`, or None. Never raises."""
     if not enabled():

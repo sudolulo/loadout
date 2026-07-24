@@ -112,6 +112,12 @@ pulled-offline game defaults to when an SD exists — and you can flip any indiv
 as local and playable — the card's existing folder is used as-is rather than moved. `pc_sd` does
 the same for the PC union: **PC games get the same per-game disk choice as ROMs.**
 
+### Console badges
+Each Steam capsule gets a small badge in its corner naming the console, tinted to that console's
+family colour — so a NES game and a PS2 game are not identical tiles in your library. It is burned
+into Steam's artwork only; ES-DE is untouched. Rendered with cairo on the Deck itself, always from
+the original cover so badges never stack. Set `console_badge` to `false` to disable.
+
 ### Cover art (SteamGridDB)
 Drop your SteamGridDB API key in `~/.config/loadout/steamgriddb.key` (or set `$LOADOUT_SGDB_KEY`)
 and each game shows its cover thumbnail in the list. Covers load lazily per section, in the

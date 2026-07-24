@@ -10,7 +10,7 @@ LOCAL copy; the NAS copy is never touched, so nothing is ever lost.
 
 Built for the Deck: 1280x800, large text, fully drivable from the pad.
 """
-import gi, json, os, re, shutil, subprocess, threading, time
+import gi, hashlib, json, os, re, shutil, subprocess, threading, time
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib, Pango, GdkPixbuf
@@ -18,6 +18,7 @@ from gi.repository import Gtk, Gdk, GLib, Pango, GdkPixbuf
 import steamgriddb                       # optional SteamGridDB cover art (no-op without a key)
 import steam_shortcuts                    # native Steam shortcuts.vdf management (drop-SRM)
 import steam_compat                       # point Windows shortcuts at Proton the way Steam does
+import art_badge                          # burn a console badge into the corner of Steam art
 import nas_setup                          # in-app SMB share setup (obscured rclone remote)
 
 HOME = os.path.expanduser("~")
@@ -91,6 +92,9 @@ _DEFAULTS = {
                                                 #   games:games/PC. "" / "off" = no NAS PC tier.
     "pc_union":    "~/Games/PC",                # the PC union you browse; the PC page reads it
     "pc_manifest": "~/Games/PC/.manifest.json",
+    "console_badge": True,                      # burn a small console badge into the corner of
+                                                #   each Steam capsule, so a NES game and a PS2
+                                                #   game are told apart in the library at a glance
     "saves_rclone_remote": "games:games/Saves",  # where emulator + PC saves are backed up, in the
                                                 #   same "remote:path" form as the tiers above.
                                                 #   Set by the in-app SMB setup; "off"/"" = no
@@ -209,6 +213,8 @@ DEFAULT_PC_DEST = "sd" if (PC_SD and str(_C["default_target"]).strip().lower() !
 SF_DIR = os.path.join(ROM_LOCAL, ".steam-shortcuts")   # deck-writable Steam pick set
 ROM_UNION = _C["rom_union"]
 ROM_TARGET = ROM_SD if DEFAULT_DEST == "sd" else ROM_LOCAL   # filesystem the disk gauge tracks
+BADGE_ON = bool(_C.get("console_badge", True))
+BADGE_CACHE = os.path.expanduser("~/.cache/loadout/badged")
 COVERS_ON = steamgriddb.enabled()                           # show game cover art (needs a key)
 COVER_W, COVER_H = 46, 69                                    # in-list thumbnail size (2:3)
 # Probe the NAS mount ONCE. A wedged rclone/FUSE mount hangs EVERY access (listdir/stat/walk) in an
@@ -316,6 +322,30 @@ def _rom_appname(fn):
     return n.strip()
 
 
+def badged_cover(appname, system, cached_only=False):
+    """A cover with the console badge burned into its corner, or the plain cover.
+
+    Always rendered from the ORIGINAL cached SteamGridDB image, never from whatever is already in
+    Steam's grid folder -- re-badging a badged file would stack a second badge every sync. With
+    `cached_only` no lookup is performed, so refreshing existing art costs nothing on the network.
+    """
+    if cached_only and not steamgriddb.cached_cover(appname):
+        return None
+    src = steamgriddb.cover(appname)
+    if not src or not BADGE_ON:
+        return src
+    try:
+        os.makedirs(BADGE_CACHE, exist_ok=True)
+        out = os.path.join(BADGE_CACHE, "%s-%s.png"
+                           % (system, hashlib.sha1(src.encode()).hexdigest()[:12]))
+        if not os.path.exists(out) or os.path.getmtime(out) < os.path.getmtime(src):
+            if not art_badge.badge(src, out, system):
+                return src                     # unreadable art: ship it unbadged rather than fail
+        return out
+    except OSError:
+        return src
+
+
 def sync_steam(dry_run=False):
     """Reconcile Steam shortcuts with the enabled set, natively — no SRM.
 
@@ -418,7 +448,7 @@ def sync_steam(dry_run=False):
         aid, pairs = steam_shortcuts.game_entry(appname, tmpls[sysid], rom, last_play=now)
         kept.append(("", pairs))
         added_aids.append(aid)
-        cov = steamgriddb.cover(appname)
+        cov = badged_cover(appname, sysid)
         if cov:
             steam_shortcuts.place_art(grid, aid, portrait=cov)
     for name, exe, kind in pc_add:
@@ -434,12 +464,40 @@ def sync_steam(dry_run=False):
                 steam_compat.set_tool(aid, steam_compat.newest_proton(HOME), home=HOME)
             except Exception:
                 pass
-        cov = steamgriddb.cover(name)
+        cov = badged_cover(name, "pc")
         if cov:
             steam_shortcuts.place_art(grid, aid, portrait=cov)
     for n in [n for n in record if n not in picks]:
         record.pop(n, None)
     pc_record(record)
+
+    # Titles already in Steam keep whatever art they were given, so without this only games added
+    # from now on would carry a console badge. Re-render from the cached original (so badges never
+    # stack) and only for art we already hold locally -- no network, whatever the library size.
+    if BADGE_ON:
+        rebadged = 0
+        for _k, e in kept:
+            try:
+                exe = str(steam_shortcuts._ci(e, "Exe")).strip('"')
+                m = re.search(r'\.steam-shortcuts/([^/]+)/', exe)
+                aid = steam_shortcuts._ci(e, "appid") & 0xFFFFFFFF
+                if m:
+                    sysid = m.group(1)
+                elif exe.startswith(PC_UNION):
+                    sysid = "pc"
+                else:
+                    continue                   # not ours: never touch someone else's artwork
+                name = str(steam_shortcuts._ci(e, "AppName"))
+                if not os.path.exists(os.path.join(grid, "%dp.png" % aid)):
+                    continue                   # it has no cover to badge
+                cov = badged_cover(name, sysid, cached_only=True)
+                if cov:
+                    steam_shortcuts.place_art(grid, aid, portrait=cov)
+                    rebadged += 1
+            except Exception:
+                pass
+        if rebadged:
+            print("badged %d existing capsule(s)" % rebadged)
     kept = [(str(i), e) for i, (_k, e) in enumerate(kept)]
     for k in range(len(root)):
         if root[k][0].lower() == "shortcuts":
