@@ -14,7 +14,7 @@ app.show_all()
 while Gtk.events_pending():
     Gtk.main_iteration()
 
-sp = app.storage_page
+sp = app.settings_page   # the text fields live on Settings since the split
 win = app
 
 def focused_entry():
@@ -71,6 +71,12 @@ if quit_calls: fails.append("B quit from the content pane")
 app.go_back()
 print("  B on sidebar: quit_called=%d (expect 1)" % len(quit_calls))
 if len(quit_calls) != 1: fails.append("B on the sidebar did not quit")
+
+# the Storage page carries no text fields at all, so it cannot raise the keyboard by any route
+st = app.storage_page
+n_entries = sum(1 for w in st.focusables if isinstance(w, Gtk.Entry))
+print("  Storage page text fields: %d (expect 0 - actions only)" % n_entries)
+if n_entries: fails.append("the Storage page still has %d text field(s)" % n_entries)
 
 print("FAIL: " + "; ".join(fails) if fails else "PASS")
 sys.exit(1 if fails else 0)

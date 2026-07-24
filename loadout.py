@@ -103,9 +103,9 @@ _DEFAULTS = {
 }
 # Values expanduser'd on load; these two are plain strings (a mode / a path-or-sentinel),
 # so leave them raw and let the resolvers below interpret them.
+# values that are NOT paths: everything else gets expanduser() applied, which throws on a bool
 _RAW_KEYS = ("default_target", "rom_sd", "pc_sd", "rom_rclone_remote", "pc_rclone_remote",
-             "saves_rclone_remote",
-)
+             "saves_rclone_remote", "console_badge")
 CONFIG_PATH = os.path.expanduser(
     os.environ.get("LOADOUT_CONFIG", "~/.config/loadout/config.json"))
 

@@ -43,7 +43,7 @@ for i in range(6):
 print("  after walking the panel: focus=%s" % type(app.get_focus()).__name__)
 
 # --- structural guarantee: the fields are not focusable unless A was pressed on them
-sp = app.storage_page
+sp = app.settings_page   # the text fields live on Settings since the split
 ents = [w for w in sp.focusables if isinstance(w, Gtk.Entry)]
 print("  text fields: %d, focusable right now: %d (expect 0)"
       % (len(ents), sum(1 for e in ents if e.get_can_focus())))

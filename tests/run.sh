@@ -11,7 +11,8 @@ for t in test_move.py test_compat.py test_badge.py; do
 done
 for t in $GUI; do
   if command -v xvfb-run >/dev/null 2>&1; then
-    out=$(xvfb-run -a python3 "$t" 2>&1 | grep -v 'Gtk-WARNING\|GLib-GObject'); r=${PIPESTATUS[0]}
+    out=$(xvfb-run -a python3 "$t" 2>&1); r=$?
+    out=$(grep -v 'Gtk-WARNING\|GLib-GObject' <<<"$out")
     printf '  %-22s %s\n' "$t" "$(tail -1 <<<"$out")"; [ $r -ne 0 ] && fail=1
   else
     printf '  %-22s SKIPPED (no xvfb-run)\n' "$t"
