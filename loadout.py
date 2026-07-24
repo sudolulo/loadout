@@ -346,6 +346,58 @@ def badged_cover(appname, system, cached_only=False):
         return src
 
 
+def managed_shortcuts(root):
+    """(appid, name, system) for every shortcut LOADOUT put in Steam.
+
+    ROM entries are recognised by the `.steam-shortcuts/<system>/` path they launch through; PC
+    entries by the appids Loadout recorded when it created them. Anything else is somebody else's
+    shortcut and is never touched."""
+    record = pc_record()
+    by_aid = {v: k for k, v in record.items()}
+    for _idx, e in steam_shortcuts._entries(root):
+        aid = steam_shortcuts._ci(e, "appid") & 0xFFFFFFFF
+        exe = str(steam_shortcuts._ci(e, "Exe")).strip('"')
+        name = str(steam_shortcuts._ci(e, "AppName"))
+        m = re.search(r'\.steam-shortcuts/([^/]+)/', exe)
+        if m:
+            yield aid, name, m.group(1)
+        elif aid in by_aid:
+            yield aid, by_aid[aid], "pc"
+
+
+def refresh_all_art(progress=None, badge_only=False):
+    """Fetch cover art for every title Loadout manages and burn the console badge into it.
+
+    The badge pass inside a normal sync is deliberately offline -- it only touches art already
+    cached, so a big library can never turn a sync into hundreds of lookups. That leaves a Deck
+    whose artwork came from somewhere else (an old Steam ROM Manager setup, say) with nothing to
+    badge, forever. This is the explicit, user-asked-for version that IS allowed to go and fetch.
+
+    Returns (badged, skipped, total). `progress(i, total, name)` is called as it goes.
+    """
+    users = steam_shortcuts.steam_users()
+    if not users:
+        return 0, 0, 0
+    cfg = os.path.join(users[0], "config")
+    grid = os.path.join(cfg, "grid")
+    raw = open(os.path.join(cfg, "shortcuts.vdf"), "rb").read()
+    items = list(managed_shortcuts(steam_shortcuts.loads(raw)))
+    done = skipped = 0
+    for i, (aid, name, sysid) in enumerate(items, 1):
+        if progress:
+            progress(i, len(items), name)
+        try:
+            cov = badged_cover(name, sysid, cached_only=badge_only)
+            if not cov:
+                skipped += 1
+                continue
+            steam_shortcuts.place_art(grid, aid, portrait=cov)
+            done += 1
+        except Exception:
+            skipped += 1
+    return done, skipped, len(items)
+
+
 def sync_steam(dry_run=False):
     """Reconcile Steam shortcuts with the enabled set, natively — no SRM.
 
@@ -475,27 +527,9 @@ def sync_steam(dry_run=False):
     # from now on would carry a console badge. Re-render from the cached original (so badges never
     # stack) and only for art we already hold locally -- no network, whatever the library size.
     if BADGE_ON:
-        rebadged = 0
-        for _k, e in kept:
-            try:
-                exe = str(steam_shortcuts._ci(e, "Exe")).strip('"')
-                m = re.search(r'\.steam-shortcuts/([^/]+)/', exe)
-                aid = steam_shortcuts._ci(e, "appid") & 0xFFFFFFFF
-                if m:
-                    sysid = m.group(1)
-                elif exe.startswith(PC_UNION):
-                    sysid = "pc"
-                else:
-                    continue                   # not ours: never touch someone else's artwork
-                name = str(steam_shortcuts._ci(e, "AppName"))
-                if not os.path.exists(os.path.join(grid, "%dp.png" % aid)):
-                    continue                   # it has no cover to badge
-                cov = badged_cover(name, sysid, cached_only=True)
-                if cov:
-                    steam_shortcuts.place_art(grid, aid, portrait=cov)
-                    rebadged += 1
-            except Exception:
-                pass
+        # offline only: art already cached gets its badge, nothing is fetched. Storage ->
+        # "Refresh artwork" is the explicit pass that is allowed to go to the network.
+        rebadged, _sk, _tot = refresh_all_art(badge_only=True)
         if rebadged:
             print("badged %d existing capsule(s)" % rebadged)
     kept = [(str(i), e) for i, (_k, e) in enumerate(kept)]
@@ -1896,7 +1930,7 @@ class StoragePage(Gtk.Box):
                    (None, self.cycle_default_disk), (None, self.toggle_sd)) \
             if mode == "settings" else \
             (("Rebuild union", self.rebuild), ("Prune empty", self.prune),
-             ("Diagnostics", self.diagnostics))
+             ("Refresh artwork", self.refresh_art), ("Diagnostics", self.diagnostics))
         for label, cb in actions:
             b = self.b_disk if cb == self.cycle_default_disk else (
                 self.b_sd if cb == self.toggle_sd else Gtk.Button(label=label))
@@ -2204,6 +2238,36 @@ class StoragePage(Gtk.Box):
         self._sync_policy_labels()
         self.prog.set_text("SD card %s. Press Rebuild union to apply."
                            % ("re-enabled (auto-detect)" if off else "disabled"))
+
+    def refresh_art(self):
+        """Fetch and badge artwork for everything Loadout has put in Steam.
+
+        Steam keeps grid art in memory, so the new capsules only appear after it restarts -- the
+        dirty flag is set so the refresh that runs when you close Loadout does exactly that."""
+        if self.busy:
+            return
+        self.busy = True
+        self.prog.set_text("Refreshing artwork…")
+
+        def work():
+            def tick(i, n, name):
+                GLib.idle_add(self.prog.set_text,
+                              "Artwork %d/%d — %s" % (i, n, name[:36]))
+            try:
+                done, skipped, total = refresh_all_art(progress=tick)
+            except Exception as ex:
+                GLib.idle_add(self._done, "Could not refresh artwork: %s" % ex)
+                return
+            if done:
+                try:                            # Steam caches art; make the exit refresh restart it
+                    open(os.path.join(HOME, ".loadout-dirty"), "w").write("art\n")
+                except OSError:
+                    pass
+            msg = ("Artwork updated for %d of %d titles%s.\n"
+                   "Close Loadout to let Steam restart and pick them up."
+                   % (done, total, (" (%d had no cover)" % skipped) if skipped else ""))
+            GLib.idle_add(self._done, msg if total else "No Loadout shortcuts in Steam yet.")
+        threading.Thread(target=work, daemon=True).start()
 
     def diagnostics(self):
         """Everything I would otherwise have to SSH in to look at: what is mounted, what the

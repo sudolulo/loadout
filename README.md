@@ -117,6 +117,9 @@ Each Steam capsule gets a small badge in its corner naming the console, tinted t
 family colour — so a NES game and a PS2 game are not identical tiles in your library. It is burned
 into Steam's artwork only; ES-DE is untouched. Rendered with cairo on the Deck itself, always from
 the original cover so badges never stack. Set `console_badge` to `false` to disable.
+A normal sync badges only art it already has cached (so it never turns into hundreds of lookups);
+**Storage → Refresh artwork** is the explicit pass that fetches covers for everything already in
+Steam — use it once on a Deck whose artwork came from another tool.
 
 ### Cover art (SteamGridDB)
 Drop your SteamGridDB API key in `~/.config/loadout/steamgriddb.key` (or set `$LOADOUT_SGDB_KEY`)
